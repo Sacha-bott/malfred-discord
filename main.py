@@ -5,6 +5,7 @@ import logging
 import asyncio
 import io
 import json
+from malfred_illustrations import image
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -40,12 +41,7 @@ def button_emoji(key):
     # Si le bot ne peut pas utiliser une emote externe, le bouton reste fonctionnel.
     return discord.PartialEmoji(name=f'malfred_{key}', id=EMOJI_IDS[key])
 
-def image(embed, key):
-    # Une image 16:9 hébergée publiquement, pas une petite vignette.
-    url = os.getenv(f'MALFRED_IMAGE_{key.upper()}', '').strip()
-    if url.startswith(('https://', 'http://')):
-        embed.set_image(url=url)
-    return embed
+
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
