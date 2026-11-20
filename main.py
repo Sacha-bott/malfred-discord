@@ -18,7 +18,8 @@ logging.basicConfig(level=logging.INFO)
 TZ = ZoneInfo('Europe/Zurich')
 DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0') or 0)
-MARKET_CHANNEL_ID = int(os.getenv('MALFRED_CHANNEL_ID', '0') or 0)
+CALENDAR_CHANNEL_ID = 1573367425326391478  # Salon Calendrier de l'Avent
+MARKET_CHANNEL_ID = CALENDAR_CHANNEL_ID  # Annonces automatiques uniquement dans ce salon
 DOC_USER_ID = 124122224016752640
 FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_mere_noel.png')
 FESSES_TROLL_PATH = os.getenv('MALFRED_FESSES_TROLL_IMAGE', 'assets/fesses_final.png')
@@ -34,6 +35,19 @@ def button_emoji(key): return discord.PartialEmoji(name=f'malfred_{key}', id=EMO
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+
+# Vérification globale de TOUTES les commandes slash, y compris les commandes admin.
+# Le refus est privé pour éviter de polluer les autres salons.
+@bot.tree.interaction_check
+async def limiter_commandes_au_calendrier(interaction: discord.Interaction) -> bool:
+    if interaction.channel_id == CALENDAR_CHANNEL_ID:
+        return True
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            '🎄 Malfred ne joue que dans le salon Calendrier de l’Avent !',
+            ephemeral=True,
+        )
+    return False
 OBJETS = {
     'bouclier': ('🛡️ Bouclier givré', 25, 'Protège contre la prochaine perte du cadeau quotidien.'),
     'trefle': ('🍀 Trèfle douteux', 15, '+15 points de chance sur le prochain cadeau.'),
@@ -978,6 +992,7 @@ bot.setup_hook=setup_hook
 async def on_ready(): logging.info('🎄 Malfred connecté : %s',bot.user)
 @bot.tree.error
 async def on_slash_error(i:discord.Interaction,error:app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure): return
     logging.exception('Erreur commande : %r',error)
     try:
         if i.response.is_done(): await i.followup.send('⚠️ Malfred a trébuché dans une congère.',ephemeral=True)
