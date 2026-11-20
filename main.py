@@ -20,6 +20,12 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0') or 0)
 CALENDAR_CHANNEL_ID = 1573367425326391478  # Salon Calendrier de l'Avent
 MARKET_CHANNEL_ID = CALENDAR_CHANNEL_ID  # Annonces automatiques uniquement dans ce salon
+# IDs des rôles Discord du podium (à créer et renseigner dans Railway).
+PODIUM_ROLE_IDS = {
+    1: int(os.getenv('MALFRED_ROLE_1_ID', '0') or 0),
+    2: int(os.getenv('MALFRED_ROLE_2_ID', '0') or 0),
+    3: int(os.getenv('MALFRED_ROLE_3_ID', '0') or 0),
+}
 DOC_USER_ID = 124122224016752640
 FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_mere_noel.png')
 FESSES_TROLL_PATH = os.getenv('MALFRED_FESSES_TROLL_IMAGE', 'assets/fesses_final.png')
@@ -112,6 +118,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS participations_evenements(user_id INTEGER, evenement TEXT, PRIMARY KEY(user_id,evenement));
         CREATE TABLE IF NOT EXISTS fesses_calendrier(annee INTEGER PRIMARY KEY, cases TEXT NOT NULL, dernier_jour TEXT);
         CREATE TABLE IF NOT EXISTS journal_admin(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, admin_id INTEGER NOT NULL, joueur_id INTEGER, action TEXT NOT NULL, details TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS podium_roles(user_id INTEGER NOT NULL, role_id INTEGER NOT NULL, expiration TEXT NOT NULL, attribue INTEGER NOT NULL DEFAULT 0, retire INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,role_id));
         ''')
 
 def joueur(db, uid): db.execute('INSERT OR IGNORE INTO joueurs(user_id) VALUES (?)', (uid,))
@@ -932,6 +939,94 @@ async def cmd_evenement(i:discord.Interaction):
     e=discord.Embed(title=nom,description='Une participation gratuite par joueur, indépendante du cadeau quotidien et des boutiques. Choisis ci-dessous !',color=discord.Color.gold())
     await i.response.send_message(embed=image(e,code),view=EvenementView(code),ephemeral=True)
 
+# Finale : lecture du classement figé, annonce unique et attribution des rôles.
+# Les égalités sont classées par ID Discord croissant, comme /classement.
+def classement_final():
+    with db_open() as db:
+        return db.execute('SELECT user_id,flocons FROM joueurs ORDER BY flocons DESC,user_id ASC LIMIT 3').fetchall()
+
+def annonce_finale_embed(scores):
+    recompenses = [
+        '💰 **20 € + rôle exclusif pendant 1 an**',
+        '🎖️ **Rôle exclusif pendant 3 mois**',
+        '🎖️ **Rôle exclusif pendant 1 mois**',
+    ]
+    medailles = ['🥇', '🥈', '🥉']
+    lignes = [f'{medailles[n]} <@{uid}> — **{points} ❄️**\n{recompenses[n]}'
+              for n, (uid, points) in enumerate(scores)]
+    desc = ('**LE VERDICT DU LUTIN EST TOMBÉ !**\n\n'
+            + ('\n\n'.join(lignes) if lignes else 'Aucun participant cette année.')
+            + '\n\nMes félicitations aux gagnants. Quant aux autres… merci pour les flocons, bande de pigeons à plumes ! 🦆😈')
+    return discord.Embed(title='👑 MALFRED — LE PODIUM FINAL 🎄', description=desc,
+                         color=discord.Color.gold()).set_footer(text='Classement figé le 24 décembre 2026 à 21 h (Suisse)')
+
+@bot.tree.command(name='admin_test_finale', description='Staff : prévisualiser le podium sans terminer le concours')
+@app_commands.guild_only()
+async def admin_test_finale(i: discord.Interaction):
+    if not staff(i):
+        return await i.response.send_message('🔒 Réservé au staff.', ephemeral=True)
+    e = annonce_finale_embed(classement_final())
+    e.title = '🧪 SIMULATION — ' + e.title
+    e.set_footer(text='Simulation uniquement : aucun score, rôle ou statut modifié.')
+    await i.response.send_message(embed=e, ephemeral=True)
+
+async def gerer_podium():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            if jeu_termine():
+                with db_open() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    annonce = db.execute("SELECT valeur FROM etat_marche WHERE cle='podium_annonce_message'").fetchone()
+                    scores = classement_final()
+                if not annonce:
+                    salon = bot.get_channel(CALENDAR_CHANNEL_ID)
+                    if salon is None:
+                        try: salon = await bot.fetch_channel(CALENDAR_CHANNEL_ID)
+                        except (discord.HTTPException, discord.Forbidden): salon = None
+                    if salon:
+                        message = await salon.send(embed=annonce_finale_embed(scores))
+                        # On conserve l'ID du message pour éviter une nouvelle publication après redémarrage.
+                        with db_open() as db:
+                            db.execute("INSERT OR IGNORE INTO etat_marche(cle,valeur) VALUES ('podium_annonce_message',?)", (str(message.id),))
+                # Les rôles peuvent être configurés même après la publication du podium.
+                if annonce or 'message' in locals():
+                    with db_open() as db:
+                        for rang,(uid,_) in enumerate(scores,1):
+                            role_id=PODIUM_ROLE_IDS[rang]
+                            if role_id:
+                                fin={1:datetime(2027,12,24,21,tzinfo=TZ),
+                                     2:datetime(2027,3,24,21,tzinfo=TZ),
+                                     3:datetime(2027,1,24,21,tzinfo=TZ)}[rang]
+                                db.execute('INSERT OR IGNORE INTO podium_roles(user_id,role_id,expiration) VALUES (?,?,?)',(uid,role_id,fin.isoformat()))
+                # Attribuer et retirer les rôles, en réessayant si Discord n'est pas disponible.
+                if GUILD_ID:
+                    guild=bot.get_guild(GUILD_ID)
+                else:
+                    guild=next((g for g in bot.guilds if g.get_channel(CALENDAR_CHANNEL_ID)),None)
+                if guild:
+                    with db_open() as db:
+                        rows=db.execute('SELECT user_id,role_id,expiration,attribue,retire FROM podium_roles WHERE retire=0').fetchall()
+                    for uid,role_id,expiration,attribue,retire in rows:
+                        role=guild.get_role(role_id)
+                        if not role:
+                            logging.warning('Rôle podium %s introuvable sur le serveur',role_id)
+                            continue
+                        try:
+                            membre=guild.get_member(uid) or await guild.fetch_member(uid)
+                            expire=now()>=datetime.fromisoformat(expiration)
+                            if expire:
+                                if role in membre.roles: await membre.remove_roles(role,reason='Fin de durée du rôle Malfred')
+                                with db_open() as db: db.execute('UPDATE podium_roles SET retire=1 WHERE user_id=? AND role_id=?',(uid,role_id))
+                            elif not attribue or role not in membre.roles:
+                                if role not in membre.roles: await membre.add_roles(role,reason='Podium du concours Malfred')
+                                with db_open() as db: db.execute('UPDATE podium_roles SET attribue=1 WHERE user_id=? AND role_id=?',(uid,role_id))
+                        except (discord.Forbidden,discord.HTTPException,discord.NotFound):
+                            logging.exception('Impossible de gérer le rôle %s pour %s',role_id,uid)
+        except Exception:
+            logging.exception('Gestion de la finale Malfred')
+        await asyncio.sleep(30 if now().date()==FIN_CONCOURS.date() else 3600)
+
 async def entretien_marche():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -986,6 +1081,7 @@ async def setup_hook():
     bot.add_view(AccueilView())
     bot.add_view(EntreeMarche());bot.add_view(CadeauxView());bot.add_view(BoutiqueView());bot.add_view(InventaireView())
     asyncio.create_task(entretien_marche())
+    asyncio.create_task(gerer_podium())
     if GUILD_ID:
         guild=discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
