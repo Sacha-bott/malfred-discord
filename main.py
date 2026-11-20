@@ -69,83 +69,86 @@ async def on_ready():
     print(f'🎄 Malfred est réveillé : {bot.user}')
 
 
+CADEAUX = {
+    1: (70, (2, 5), (1, 3), 'Paquet du lâche'),
+    2: (50, (5, 12), (4, 8), 'Coffre du filou'),
+    3: (30, (15, 30), (8, 15), 'Cadeau du démon'),
+}
+
+
+def solde_joueur(user_id):
+    with connexion() as db:
+        creer_joueur(db, user_id)
+        return db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
+
+
+def ouvrir_cadeau(user_id, choix):
+    chance, gains, pertes, nom = CADEAUX[choix]
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        creer_joueur(db, user_id)
+        solde, dernier = db.execute(
+            'SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id=?', (user_id,)
+        ).fetchone()
+        if dernier == jour_utc():
+            return '🎄 Doucement, petit pigeon ! Tu as déjà ouvert ton cadeau aujourd’hui. Reviens demain ! 😈'
+        bonus = 15 if possede(db, user_id, 'trefle') else 0
+        if bonus:
+            retirer_objet(db, user_id, 'trefle')
+        victoire = random.randint(1, 100) <= chance + bonus
+        montant = random.randint(*(gains if victoire else pertes))
+        protege = not victoire and possede(db, user_id, 'bouclier')
+        if protege:
+            retirer_objet(db, user_id, 'bouclier')
+        nouveau = solde + montant if victoire else (solde if protege else max(0, solde - montant))
+        db.execute('UPDATE joueurs SET flocons=?, dernier_cadeau=? WHERE user_id=?',
+                   (nouveau, jour_utc(), user_id))
+    if victoire:
+        phrase = random.choice(['Mon comptable va me tuer !', 'La chance tourne, pigeon.', 'J’ai emballé le mauvais cadeau ! 😤'])
+        resultat = f'🎉 **+{nouveau - solde} flocons !**'
+    elif protege:
+        phrase = '🛡️ Ton bouclier s’est brisé en absorbant la perte !'
+        resultat = '❄️ **0 flocon perdu !**'
+    else:
+        phrase = random.choice(['HAHA ! Merci, pigeon !', 'C’est Noël pour MOI ! 😈', 'Fallait lire les petites lignes.'])
+        resultat = f'💀 **{nouveau - solde} flocons !**'
+    return (f'🎁 Tu ouvres **{nom}** !\n{resultat}\n{phrase}\n'
+            f'❄️ Nouveau solde : **{nouveau} flocons**.'
+            + (' 🍀 Trèfle utilisé !' if bonus else ''))
+
+
+def afficher_cadeaux():
+    embed = discord.Embed(title='🎁 LES CADEAUX PIÉGÉS',
+        description='Choisis ton poison, petit pigeon ! 😈\n**Un seul cadeau par jour.**',
+        color=discord.Color.red())
+    embed.add_field(name='🟢 Paquet du lâche · 70 %', value='Gain : **2 à 5** ❄️\nPerte : **1 à 3** ❄️', inline=False)
+    embed.add_field(name='🟡 Coffre du filou · 50 %', value='Gain : **5 à 12** ❄️\nPerte : **4 à 8** ❄️', inline=False)
+    embed.add_field(name='🔴 Cadeau du démon · 30 %', value='Gain : **15 à 30** ❄️\nPerte : **8 à 15** ❄️', inline=False)
+    embed.set_footer(text='Appuie directement sur un bouton pour ouvrir ton cadeau')
+    return embed
+
+
 @bot.command()
 async def malfred(ctx):
-    await ctx.send('🎄 HO HO HO ! Malfred est là ! Surveillez vos flocons, bande de pigeons ! 😈')
+    await ctx.send(embed=afficher_accueil(), view=AccueilView())
 
 
 @bot.command(aliases=['flocon'])
 async def flocons(ctx):
-    with connexion() as db:
-        creer_joueur(db, ctx.author.id)
-        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (ctx.author.id,)).fetchone()[0]
-    await ctx.send(f'❄️ {ctx.author.mention}, tu possèdes **{solde} flocons** !')
+    await ctx.send(f'❄️ {ctx.author.mention}, tu possèdes **{solde_joueur(ctx.author.id)} flocons** !')
 
 
 @bot.command()
 async def cadeau(ctx):
-    await ctx.send(
-        '🎁 **CHOISIS TON POISON, PETIT PIGEON !**\n'
-        '1️⃣ **Paquet du lâche** — 70 % de gagner (+2 à +5), sinon −1 à −3 ❄️\n'
-        '2️⃣ **Coffre du filou** — 50 % de gagner (+5 à +12), sinon −4 à −8 ❄️\n'
-        '3️⃣ **Cadeau du démon** — 30 % de gagner (+15 à +30), sinon −8 à −15 ❄️\n\n'
-        'Tape **!ouvrir 1**, **!ouvrir 2** ou **!ouvrir 3**. Un seul cadeau par jour ! 😈'
-    )
+    await ctx.send(embed=afficher_cadeaux(), view=CadeauxView())
 
 
 @bot.command()
 async def ouvrir(ctx, choix: int = 0):
-    cadeaux = {
-        1: (70, (2, 5), (1, 3), 'Paquet du lâche'),
-        2: (50, (5, 12), (4, 8), 'Coffre du filou'),
-        3: (30, (15, 30), (8, 15), 'Cadeau du démon'),
-    }
-    if choix not in cadeaux:
-        await ctx.send('🎁 Choisis **1**, **2** ou **3**, génie du mal.')
-        return
-
-    chance, gains, pertes, nom = cadeaux[choix]
-    with connexion() as db:
-        db.execute('BEGIN IMMEDIATE')
-        creer_joueur(db, ctx.author.id)
-        solde, dernier = db.execute(
-            'SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id=?', (ctx.author.id,)
-        ).fetchone()
-        if dernier == jour_utc():
-            reponse = '🎄 Doucement, petit pigeon ! Tu as déjà ouvert ton cadeau aujourd’hui. Reviens demain ! 😈'
-        else:
-            bonus = 15 if possede(db, ctx.author.id, 'trefle') else 0
-            if bonus:
-                retirer_objet(db, ctx.author.id, 'trefle')
-            victoire = random.randint(1, 100) <= chance + bonus
-            montant = random.randint(*(gains if victoire else pertes))
-            protege = not victoire and possede(db, ctx.author.id, 'bouclier')
-            if protege:
-                retirer_objet(db, ctx.author.id, 'bouclier')
-            nouveau = solde + montant if victoire else (solde if protege else max(0, solde - montant))
-            db.execute('UPDATE joueurs SET flocons=?, dernier_cadeau=? WHERE user_id=?',
-                       (nouveau, jour_utc(), ctx.author.id))
-            if victoire:
-                phrase = random.choice([
-                    'QUOI ?! Tu as gagné ?! Mon comptable va me tuer !',
-                    'Profite, petit insolent. La chance tourne.',
-                    'J’ai dû emballer le mauvais cadeau... 😤',
-                ])
-                resultat = f'🎉 **+{nouveau - solde} flocons !**'
-            elif protege:
-                phrase = '🛡️ Ton Bouclier givré a absorbé la perte et s’est brisé. Voleur de victoire !'
-                resultat = '❄️ **0 flocon perdu !**'
-            else:
-                phrase = random.choice([
-                    'HAHAHA ! Merci pour les flocons, pigeon !',
-                    'C’est Noël pour MOI, visiblement. 😈',
-                    'Tu aurais dû lire les petites lignes. Elles n’existent pas.',
-                ])
-                resultat = f'💀 **{nouveau - solde} flocons !**'
-            reponse = (f'🎁 {ctx.author.mention} ouvre **{nom}** !\n{resultat}\n{phrase}\n'
-                       f'❄️ Nouveau solde : **{nouveau} flocons**.'
-                       + (' 🍀 Trèfle utilisé !' if bonus else ''))
-    await ctx.send(reponse)
+    if choix not in CADEAUX:
+        await ctx.send(embed=afficher_cadeaux(), view=CadeauxView())
+    else:
+        await ctx.send(ouvrir_cadeau(ctx.author.id, choix))
 
 
 def afficher_boutique():
@@ -235,8 +238,105 @@ class BoutiqueView(discord.ui.View):
 
     @discord.ui.button(label='Cadeaux du jour', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:cadeaux')
     async def cadeaux_bouton(self, interaction, button):
-        embed = discord.Embed(title='🎁 Choisis ton poison !', description='1️⃣ Paquet du lâche : 70 % de gagner (+2 à +5), sinon −1 à −3\n2️⃣ Coffre du filou : 50 % de gagner (+5 à +12), sinon −4 à −8\n3️⃣ Cadeau du démon : 30 % de gagner (+15 à +30), sinon −8 à −15\n\nPour ouvrir : `!ouvrir 1`, `!ouvrir 2` ou `!ouvrir 3`.', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=afficher_cadeaux(), view=CadeauxView(), ephemeral=True)
+
+
+def afficher_accueil():
+    return discord.Embed(title='🎄 MALFRED — LE LUTIN DU CHAOS',
+        description='Bienvenue au marché noir de Noël, bande de pigeons ! 😈\n'
+                    'Choisis une activité avec les boutons ci-dessous.\n\n'
+                    '🎁 **Cadeaux** · Tente ta chance chaque jour\n'
+                    '🛒 **Boutique** · Dépense tes flocons\n'
+                    '🎒 **Inventaire** · Regarde tes objets\n'
+                    '🏆 **Classement** · Espionne les riches',
+        color=discord.Color.green())
+
+
+def afficher_classement(guild):
+    with connexion() as db:
+        scores = db.execute('SELECT user_id, flocons FROM joueurs ORDER BY flocons DESC, user_id ASC').fetchall()
+    if guild:
+        scores = [(uid, score) for uid, score in scores if guild.get_member(uid) is not None]
+    top = scores[:10]
+    description = '\n'.join(f'**{i}.** <@{uid}> — **{score}** ❄️' for i, (uid, score) in enumerate(top, 1))
+    return discord.Embed(title='🏆 LES PIGEONS LES PLUS RICHES',
+                         description=description or 'Aucun pigeon à plumer pour le moment.',
+                         color=discord.Color.gold())
+
+
+class CadeauxView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def ouvrir(self, interaction, numero):
+        resultat = ouvrir_cadeau(interaction.user.id, numero)
+        await interaction.response.send_message(embed=discord.Embed(
+            title='🎁 Verdict de Malfred', description=resultat, color=discord.Color.gold()), ephemeral=True)
+
+    @discord.ui.button(label='Paquet du lâche', emoji='🟢', style=discord.ButtonStyle.success, custom_id='malfred:ouvrir:1')
+    async def paquet(self, interaction, button):
+        await self.ouvrir(interaction, 1)
+
+    @discord.ui.button(label='Coffre du filou', emoji='🟡', style=discord.ButtonStyle.primary, custom_id='malfred:ouvrir:2')
+    async def coffre(self, interaction, button):
+        await self.ouvrir(interaction, 2)
+
+    @discord.ui.button(label='Cadeau du démon', emoji='🔴', style=discord.ButtonStyle.danger, custom_id='malfred:ouvrir:3')
+    async def demon(self, interaction, button):
+        await self.ouvrir(interaction, 3)
+
+
+class AccueilView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='Cadeaux', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:menu:cadeaux')
+    async def cadeaux(self, interaction, button):
+        await interaction.response.send_message(embed=afficher_cadeaux(), view=CadeauxView(), ephemeral=True)
+
+    @discord.ui.button(label='Boutique', emoji='🛒', style=discord.ButtonStyle.primary, custom_id='malfred:menu:boutique')
+    async def boutique(self, interaction, button):
+        await interaction.response.send_message(embed=afficher_boutique(), view=BoutiqueView(), ephemeral=True)
+
+    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:inventaire')
+    async def inventaire(self, interaction, button):
+        await interaction.response.send_message(embed=afficher_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
+
+    @discord.ui.button(label='Classement', emoji='🏆', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
+    async def classement(self, interaction, button):
+        await interaction.response.send_message(embed=afficher_classement(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
+    async def flocons(self, interaction, button):
+        await interaction.response.send_message(f'❄️ Tu possèdes **{solde_joueur(interaction.user.id)} flocons** !', ephemeral=True)
+
+
+def utiliser_boule(user_id):
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        creer_joueur(db, user_id)
+        if not possede(db, user_id, 'boule'):
+            return '🔮 Tu ne possèdes pas de boule à neige, pigeon !'
+        retirer_objet(db, user_id, 'boule')
+        montant = random.randint(-5, 10)
+        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
+        protege = montant < 0 and possede(db, user_id, 'bouclier')
+        if protege:
+            retirer_objet(db, user_id, 'bouclier')
+        nouveau = solde if protege else max(0, solde + montant)
+        db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?', (nouveau, user_id))
+    return (f'🔮 Malfred secoue sa boule à neige... **{nouveau - solde:+d} flocons** !\n'
+            + ('🛡️ Ton bouclier t’a protégé !\n' if protege else '')
+            + f'❄️ Nouveau solde : **{nouveau}**. 😈')
+
+
+class InventaireView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='Utiliser la boule à neige', emoji='🔮', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire:boule')
+    async def boule(self, interaction, button):
+        await interaction.response.send_message(utiliser_boule(interaction.user.id), ephemeral=True)
 
 
 @bot.command()
@@ -246,7 +346,7 @@ async def boutique(ctx):
 
 @bot.command()
 async def inventaire(ctx):
-    await ctx.send(embed=afficher_inventaire(ctx.author))
+    await ctx.send(embed=afficher_inventaire(ctx.author), view=InventaireView())
 
 
 @bot.command()
@@ -260,25 +360,12 @@ async def acheter(ctx, objet: str = ''):
 
 @bot.command()
 async def rencontre(ctx):
-    with connexion() as db:
-        db.execute('BEGIN IMMEDIATE')
-        creer_joueur(db, ctx.author.id)
-        if not possede(db, ctx.author.id, 'boule'):
-            reponse = '🔮 Pas de boule à neige ! Achètes-en une avec **!boutique**, pigeon !'
-        else:
-            retirer_objet(db, ctx.author.id, 'boule')
-            montant = random.randint(-5, 10)
-            solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (ctx.author.id,)).fetchone()[0]
-            protege = montant < 0 and possede(db, ctx.author.id, 'bouclier')
-            if protege:
-                retirer_objet(db, ctx.author.id, 'bouclier')
-            nouveau = solde if protege else max(0, solde + montant)
-            db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?', (nouveau, ctx.author.id))
-            variation = nouveau - solde
-            reponse = (f'🔮 Malfred secoue sa boule à neige... **{variation:+d} flocons** !\n'
-                       + ('🛡️ Ton bouclier t’a protégé !\n' if protege else '')
-                       + f'❄️ Nouveau solde : **{nouveau}**. 😈')
-    await ctx.send(reponse)
+    await ctx.send(utiliser_boule(ctx.author.id))
+
+
+@bot.command()
+async def classement(ctx):
+    await ctx.send(embed=afficher_classement(ctx.guild))
 
 
 @bot.event
@@ -297,4 +384,7 @@ if __name__ == '__main__':
     if not token:
         raise RuntimeError('La variable DISCORD_TOKEN manque sur Railway.')
     bot.add_view(BoutiqueView())
+    bot.add_view(AccueilView())
+    bot.add_view(CadeauxView())
+    bot.add_view(InventaireView())
     bot.run(token)
