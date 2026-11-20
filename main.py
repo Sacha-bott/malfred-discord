@@ -716,33 +716,86 @@ def evenement_actuel():
     if t.month!=12 or t.day not in EVENEMENTS or t.year!=2026: return None
     if t.day==24 and t.hour>=21: return None
     return EVENEMENTS[t.day]
+def resultat_evenement(code, choix):
+    """Tirage commun au jeu réel et à sa simulation, sans effet de bord."""
+    if code=='hotte':
+        if choix not in (1,2,3): return None
+        delta=random.choice([-5,-3,0,3,6,9,12]);detail=f'Sac n°{choix} ouvert !'
+    elif code=='casino':
+        if choix!=1: return None
+        symbols=[random.choice(['🍒','🔔','❄️','🦆']) for _ in range(3)]
+        delta=18 if len(set(symbols))==1 else 6 if len(set(symbols))==2 else random.choice([-3,0,2])
+        detail=' '.join(symbols)
+    elif code=='tempete':
+        if choix not in (1,2): return None
+        delta=3 if choix==1 else random.choice([-8,-5,8,12,16])
+        detail='Tu t’es abrité.' if choix==1 else 'Tu as couru dans la tempête !'
+    elif code=='finale':
+        if choix not in (1,2): return None
+        delta=4 if choix==1 else random.choice([-12,-8,12,18,24])
+        detail='Tu as sécurisé ton bonus.' if choix==1 else 'Tu as tenté le tout pour le tout !'
+    else:
+        return None
+    return delta,detail
+
 def jouer_evenement(uid,choix):
     ev=evenement_actuel()
     if not ev: return '🎪 Aucun grand événement ouvert actuellement.',False,None
     code,nom=ev
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE');avant=balance(db,uid)
-        if db.execute('SELECT 1 FROM participations_evenements WHERE user_id=? AND evenement=?',(uid,code)).fetchone(): return 'Tu as déjà participé à cet événement.',False,None
-        if code=='hotte':
-            if choix not in (1,2,3): return 'Choisis un des trois sacs.',False,None
-            delta=random.choice([-5,-3,0,3,6,9,12]);detail=f'Sac n°{choix} ouvert !'
-        elif code=='casino':
-            if choix!=1: return 'Actionne la machine à sous.',False,None
-            symbols=[random.choice(['🍒','🔔','❄️','🦆']) for _ in range(3)]
-            delta=18 if len(set(symbols))==1 else 6 if len(set(symbols))==2 else random.choice([-3,0,2])
-            detail=' '.join(symbols)
-        elif code=='tempete':
-            if choix not in (1,2): return 'Choisis abri ou tempête.',False,None
-            delta=3 if choix==1 else random.choice([-8,-5,8,12,16])
-            detail='Tu t’es abrité.' if choix==1 else 'Tu as couru dans la tempête !'
-        else:
-            if choix not in (1,2): return 'Choisis sécurité ou dernier pari.',False,None
-            delta=4 if choix==1 else random.choice([-12,-8,12,18,24])
-            detail='Tu as sécurisé ton bonus.' if choix==1 else 'Tu as tenté le tout pour le tout !'
+        if db.execute('SELECT 1 FROM participations_evenements WHERE user_id=? AND evenement=?',(uid,code)).fetchone():
+            return 'Tu as déjà participé à cet événement.',False,None
+        resultat=resultat_evenement(code,choix)
+        if resultat is None: return 'Choix invalide pour cet événement.',False,None
+        delta,detail=resultat
         apres=max(0,avant+delta)
         db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?',(apres,uid))
         db.execute('INSERT INTO participations_evenements(user_id,evenement) VALUES (?,?)',(uid,code))
     return f'**{nom}**\n{detail}\nRésultat : **{apres-avant:+d} ❄️**\nNouveau solde : **{apres} ❄️**.',True,code
+
+# Simulation staff : mêmes probabilités que le jeu, aucune écriture en base.
+class TestEvenementView(discord.ui.View):
+    def __init__(self,code,auteur_id):
+        super().__init__(timeout=300)
+        self.auteur_id=auteur_id
+        self.code=code
+        labels={'hotte':['Sac 1','Sac 2','Sac 3'],
+                'casino':['Actionner la machine'],
+                'tempete':['Se mettre à l’abri','Courir dans la neige'],
+                'finale':['Sécuriser le bonus','Tenter le grand pari']}[code]
+        for idx,label in enumerate(labels,1):
+            btn=discord.ui.Button(label=label,style=discord.ButtonStyle.primary if idx>1 else discord.ButtonStyle.success)
+            async def callback(i,n=idx):
+                if i.user.id!=self.auteur_id or not staff(i):
+                    return await i.response.send_message('🔒 Ce test est réservé à son auteur.',ephemeral=True)
+                delta,detail=resultat_evenement(self.code,n)
+                nom=next(nom for c,nom in EVENEMENTS.values() if c==self.code)
+                e=discord.Embed(title=f'🧪 TEST — {nom}',
+                    description=f'{detail}\nRésultat simulé : **{delta:+d} ❄️**\n\n🔒 Aucun flocon ni participation modifié.\nTu peux retenter autant que tu veux.',
+                    color=discord.Color.gold())
+                await i.response.send_message(embed=image(e,self.code),ephemeral=True)
+            btn.callback=callback
+            self.add_item(btn)
+
+@bot.tree.command(name='admin_test_evenement',description='Staff : simuler un des quatre événements sans modifier les scores')
+@app_commands.describe(evenement='Choisir l’événement à prévisualiser')
+@app_commands.choices(evenement=[
+    app_commands.Choice(name='5 décembre — Hotte des Regrets',value='hotte'),
+    app_commands.Choice(name='12 décembre — Casino du Lutin',value='casino'),
+    app_commands.Choice(name='19 décembre — Tempête des Flocons',value='tempete'),
+    app_commands.Choice(name='24 décembre — Dernier Coup de Malfred',value='finale'),
+])
+@app_commands.guild_only()
+async def admin_test_evenement(i:discord.Interaction,evenement:app_commands.Choice[str]):
+    if not staff(i): return await i.response.send_message('🔒 Réservé au staff.',ephemeral=True)
+    code=evenement.value
+    nom=next(nom for c,nom in EVENEMENTS.values() if c==code)
+    e=discord.Embed(title=f'🧪 SIMULATION — {nom}',
+        description='Choisis une action. Les probabilités sont celles du vrai événement.\n**Aucun flocon ni participation ne sera modifié.**',
+        color=discord.Color.gold())
+    await i.response.send_message(embed=image(e,code),view=TestEvenementView(code,i.user.id),ephemeral=True)
+
 class EvenementView(discord.ui.View):
     def __init__(self,code):
         super().__init__(timeout=300)
