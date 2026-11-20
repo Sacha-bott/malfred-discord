@@ -356,7 +356,7 @@ class AccueilView(discord.ui.View):
     async def boutique(self,i,b): await i.response.send_message(embed=boutique_embed(),view=BoutiqueView(),ephemeral=True)
     @discord.ui.button(label='Inventaire',emoji=button_emoji('machiavelique'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:inventaire')
     async def inventaire(self,i,b): await i.response.send_message(embed=inventaire_embed(i.user),view=InventaireView(),ephemeral=True)
-    @discord.ui.button(label='Classement',emoji=button_emoji('riche'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:classement')
+    @discord.ui.button(label='Classement',emoji=button_emoji('moquerie'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:classement')
     async def classement(self,i,b): await i.response.send_message(embed=classement_embed())
     @discord.ui.button(label='Mes flocons',emoji=button_emoji('flocon'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:flocons',row=1)
     async def flocons(self,i,b): await i.response.send_message(f'❄️ Tu as **{solde(i.user.id)} flocons**.',ephemeral=True)
