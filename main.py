@@ -22,7 +22,7 @@ MARKET_CHANNEL_ID = int(os.getenv('MALFRED_CHANNEL_ID', '0') or 0)
 DOC_USER_ID = 124122224016752640
 FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_mere_noel.png')
 FESSES_TROLL_PATH = os.getenv('MALFRED_FESSES_TROLL_IMAGE', 'assets/fesses_final.png')
-STAFF_IDS = {int(s.strip()) for s in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if s.strip().isdigit()}
+STAFF_IDS = {584108314502234145, 173841606200262657, 111928772277600256}  # Saphi, Fae, Bady uniquement
 EMOJI_IDS = {
     'amoureux': 1573298335266115614, 'flocon': 1573298111219109948,
     'fume': 1573298043090899164, 'machiavelique': 1573297932361408594,
@@ -68,6 +68,9 @@ REPLIQUES = {
 def phrase(k): return random.choice(REPLIQUES[k])
 def now(): return datetime.now(TZ)
 def jour(): return now().date().isoformat()
+FIN_CONCOURS = datetime(2026, 12, 24, 21, 0, tzinfo=TZ)
+MESSAGE_FIN = '🏁 Le concours Malfred est terminé depuis le 24 décembre à 21 h (heure suisse). Les scores sont figés !'
+def jeu_termine(): return now() >= FIN_CONCOURS
 def db_open():
     directory = os.path.dirname(DATABASE_PATH)
     if directory: os.makedirs(directory, exist_ok=True)
@@ -89,6 +92,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS dettes(user_id INTEGER, echeance TEXT, montant INTEGER, PRIMARY KEY(user_id,echeance));
         CREATE TABLE IF NOT EXISTS participations_evenements(user_id INTEGER, evenement TEXT, PRIMARY KEY(user_id,evenement));
         CREATE TABLE IF NOT EXISTS fesses_calendrier(annee INTEGER PRIMARY KEY, cases TEXT NOT NULL, dernier_jour TEXT);
+        CREATE TABLE IF NOT EXISTS journal_admin(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, admin_id INTEGER NOT NULL, joueur_id INTEGER, action TEXT NOT NULL, details TEXT NOT NULL);
         ''')
 
 def joueur(db, uid): db.execute('INSERT OR IGNORE INTO joueurs(user_id) VALUES (?)', (uid,))
@@ -113,6 +117,7 @@ def marche_actuel(db):
     return db.execute('SELECT id,fin,offres FROM marches WHERE debut<=? AND fin>? ORDER BY id DESC LIMIT 1', (t,t)).fetchone()
 
 def ouvrir_cadeau(uid, choix):
+    if jeu_termine(): return MESSAGE_FIN, discord.Color.orange(), False, 'deja'
     chance, gains, pertes, nom = CADEAUX[choix]
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -156,6 +161,7 @@ def ouvrir_cadeau(uid, choix):
     return f'**{nom}**\n\n{msg}\n\n❄️ Nouveau solde : **{apres} flocons**.', color, True, humeur
 
 def achat_normal(uid, code):
+    if jeu_termine(): return MESSAGE_FIN, False
     nom, prix, _ = OBJETS[code]
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -170,6 +176,7 @@ def achat_normal(uid, code):
     return f'🛒 **{nom}** acheté pour **{prix} ❄️** !\n{phrase("achat")}\n❄️ Solde : **{avant-prix}**.',True
 
 def achat_noir(uid,code,sacrifice=None):
+    if jeu_termine(): return MESSAGE_FIN, False
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
         marche=marche_actuel(db)
@@ -200,6 +207,7 @@ def achat_noir(uid,code,sacrifice=None):
     return f'🕯️ **{NOIR[code][0]}** acheté et rangé dans ton inventaire ! {phrase("achat")}',True
 
 def activer(uid,code):
+    if jeu_termine(): return MESSAGE_FIN, False
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
         avant=balance(db,uid)
@@ -237,6 +245,7 @@ def activer(uid,code):
 # Une rencontre surprise est tentée après un cadeau ou un achat réussi.
 # 30 % de chance par action, une rencontre automatique maximum par jour et par joueur.
 def rencontre_aleatoire(uid):
+    if jeu_termine(): return None
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
         cle=f'rencontre_auto:{uid}:{jour()}'
@@ -494,7 +503,7 @@ async def cmd_rencontre(i:discord.Interaction):
     await i.response.send_message(msg,ephemeral=True)
     if ok: await publier(i,'🔮 RENCONTRE IMPROBABLE',msg,discord.Color.purple(),'rencontre')
 
-def staff(i): return i.user.id in STAFF_IDS or (isinstance(i.user,discord.Member) and i.user.guild_permissions.manage_guild)
+def staff(i): return i.user.id in STAFF_IDS
 # Tests staff : aucune modification des flocons, de l'inventaire ou du calendrier réel.
 @bot.tree.command(name='admin_test_rencontre', description='Staff : prévisualiser une rencontre surprise')
 @app_commands.guild_only()
@@ -537,9 +546,11 @@ async def admin_test_fesses(i:discord.Interaction,jour_test:app_commands.Range[i
 @app_commands.guild_only()
 async def reset_cadeau(i:discord.Interaction,joueur:discord.User):
     if not staff(i): return await i.response.send_message('🔒 Réservé au staff.',ephemeral=True)
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
     with db_open() as db:
         joueur_id=joueur.id;db.execute('BEGIN IMMEDIATE');balance(db,joueur_id)
         db.execute('UPDATE joueurs SET dernier_cadeau=NULL WHERE user_id=?',(joueur_id,))
+        db.execute('INSERT INTO journal_admin(date,admin_id,joueur_id,action,details) VALUES (?,?,?,?,?)',(now().isoformat(),i.user.id,joueur_id,'reset_cadeau','Cadeau quotidien réinitialisé'))
     await i.response.send_message(f'✅ Cadeau réinitialisé pour {joueur.mention}, flocons inchangés.',ephemeral=True)
 
 class ConfirmationResetTotal(discord.ui.View):
@@ -553,6 +564,7 @@ class ConfirmationResetTotal(discord.ui.View):
         return True
     @discord.ui.button(label='Oui, tout remettre à zéro', style=discord.ButtonStyle.danger)
     async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if jeu_termine(): return await interaction.response.edit_message(content=MESSAGE_FIN,view=None)
         with db_open() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE joueurs SET flocons=20, dernier_cadeau=NULL')
@@ -570,7 +582,84 @@ class ConfirmationResetTotal(discord.ui.View):
 @app_commands.guild_only()
 async def admin_reset_total(interaction: discord.Interaction):
     if not staff(interaction): return await interaction.response.send_message('🔒 Réservé au staff.', ephemeral=True)
+    if jeu_termine(): return await interaction.response.send_message(MESSAGE_FIN,ephemeral=True)
     await interaction.response.send_message('⚠️ **ATTENTION : remise à zéro GLOBALE et irréversible !**\nTous les joueurs reviendront à **20 flocons**. Objets, bonus, dettes, cadeaux quotidiens, achats, marchés et événements seront effacés.\n\nConfirmer la suppression des données de test ?',view=ConfirmationResetTotal(interaction.user.id),ephemeral=True)
+
+# Consultation privée : les commandes admin n'altèrent pas le compte consulté.
+def details_joueur(uid):
+    with db_open() as db:
+        profil=db.execute('SELECT flocons,dernier_cadeau FROM joueurs WHERE user_id=?',(uid,)).fetchone()
+        achat=db.execute('SELECT dernier_achat FROM boutique_joueurs WHERE user_id=?',(uid,)).fetchone()
+        inventaire=db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=? AND quantite>0 ORDER BY objet',(uid,)).fetchall()
+        effets=db.execute('SELECT trefle,bouclier,miroir,corrompu,blocage_cadeau,dette FROM activations WHERE user_id=?',(uid,)).fetchone()
+        tirage=db.execute('SELECT jour,choix,solde_avant,resultat,montant,rejoue FROM tirages WHERE user_id=?',(uid,)).fetchone()
+        evenements=db.execute('SELECT evenement FROM participations_evenements WHERE user_id=? ORDER BY evenement',(uid,)).fetchall()
+        dettes=db.execute('SELECT echeance,montant FROM dettes WHERE user_id=? ORDER BY echeance',(uid,)).fetchall()
+    return profil,achat,inventaire,effets,tirage,evenements,dettes
+
+@bot.tree.command(name='admin_joueur',description='Admin : inspecter le compte, inventaire et état du cadeau')
+@app_commands.describe(joueur='Membre à inspecter')
+@app_commands.guild_only()
+async def admin_joueur(i:discord.Interaction,joueur:discord.User):
+    if not staff(i): return await i.response.send_message('🔒 Accès refusé.',ephemeral=True)
+    profil,achat,items,effets,tirage,events,dettes=details_joueur(joueur.id)
+    if not profil: return await i.response.send_message(f'🎒 {joueur.mention} n’a pas encore de compte Malfred.',ephemeral=True)
+    noms={**{k:v[0] for k,v in OBJETS.items()},**{k:v[0] for k,v in NOIR.items()}}
+    inventaire='\n'.join(f'{noms.get(code,code)} ×{q}' for code,q in items) or 'Vide'
+    actifs=[]
+    if effets:
+        actifs=[nom for flag,nom in zip(effets[:4],['Trèfle','Bouclier','Miroir','Trèfle corrompu']) if flag]
+        if effets[4]: actifs.append('Cadeau bloqué le '+effets[4])
+    embed=discord.Embed(title=f'🛠️ Fiche Malfred — {joueur.display_name}',color=discord.Color.blue())
+    embed.add_field(name='❄️ Flocons',value=str(profil[0]),inline=True)
+    embed.add_field(name='🎁 Cadeau du jour',value='Déjà joué' if profil[1]==jour() else 'Disponible',inline=True)
+    embed.add_field(name='🛒 Achat normal du jour',value='Déjà effectué' if achat and achat[0]==jour() else 'Disponible',inline=True)
+    embed.add_field(name='🎒 Inventaire',value=inventaire[:1024],inline=False)
+    embed.add_field(name='✨ Bonus / effets',value=', '.join(actifs) or 'Aucun',inline=False)
+    embed.add_field(name='🎪 Événements déjà joués',value=', '.join(x[0] for x in events) or 'Aucun',inline=False)
+    embed.add_field(name='📜 Dettes',value=', '.join(f'{d}: {m} ❄️' for d,m in dettes) or 'Aucune',inline=False)
+    await i.response.send_message(embed=embed,ephemeral=True)
+
+@bot.tree.command(name='admin_historique',description='Admin : vérifier le dernier tirage et les participations')
+@app_commands.describe(joueur='Membre à inspecter')
+@app_commands.guild_only()
+async def admin_historique(i:discord.Interaction,joueur:discord.User):
+    if not staff(i): return await i.response.send_message('🔒 Accès refusé.',ephemeral=True)
+    profil,achat,items,effets,tirage,events,dettes=details_joueur(joueur.id)
+    if not profil: return await i.response.send_message('Aucun compte Malfred pour ce joueur.',ephemeral=True)
+    if tirage:
+        d,choix,avant,apres,montant,rejoue=tirage
+        texte=f'Date : **{d}**\nCadeau : **{CADEAUX.get(choix,(None,None,None,"Inconnu"))[3]}**\nSolde avant : **{avant}** → après : **{apres}**\nRésultat : **{montant:+d} ❄️**\nRejoué : **{"Oui" if rejoue else "Non"}**'
+    else: texte='Aucun tirage enregistré.'
+    texte+=f'\n\nDernier achat normal : **{achat[0] if achat else "Aucun"}**'
+    texte+='\nÉvénements joués : '+(', '.join(x[0] for x in events) or 'Aucun')
+    texte+='\nDernier cadeau enregistré : **'+str(profil[1] or 'Aucun')+'**'
+    await i.response.send_message(embed=discord.Embed(title=f'📋 Historique — {joueur.display_name}',description=texte,color=discord.Color.blue()),ephemeral=True)
+
+@bot.tree.command(name='admin_donner',description='Admin : corriger le solde avec un montant positif ou négatif')
+@app_commands.describe(joueur='Joueur concerné',montant='Flocons à ajouter (+) ou retirer (-)',raison='Motif de la correction, enregistré dans le journal')
+@app_commands.guild_only()
+async def admin_donner(i:discord.Interaction,joueur:discord.User,montant:app_commands.Range[int,-500,500],raison:app_commands.Range[str,3,200]):
+    if not staff(i): return await i.response.send_message('🔒 Accès refusé.',ephemeral=True)
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
+    if montant==0: return await i.response.send_message('Indique un montant différent de zéro.',ephemeral=True)
+    with db_open() as db:
+        db.execute('BEGIN IMMEDIATE')
+        avant=balance(db,joueur.id)
+        apres=max(0,avant+montant)
+        db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?',(apres,joueur.id))
+        db.execute('INSERT INTO journal_admin(date,admin_id,joueur_id,action,details) VALUES (?,?,?,?,?)',
+                   (now().isoformat(),i.user.id,joueur.id,'correction_flocons',f'{avant} -> {apres}; demandé {montant:+d}; raison: {raison}'))
+    await i.response.send_message(f'✅ {joueur.mention} : **{avant} → {apres} ❄️** (variation réelle : {apres-avant:+d}). Motif journalisé : {raison}',ephemeral=True)
+
+@bot.tree.command(name='admin_journal',description='Admin : voir les 10 dernières corrections effectuées')
+@app_commands.guild_only()
+async def admin_journal(i:discord.Interaction):
+    if not staff(i): return await i.response.send_message('🔒 Accès refusé.',ephemeral=True)
+    with db_open() as db:
+        rows=db.execute('SELECT date,admin_id,joueur_id,action,details FROM journal_admin ORDER BY id DESC LIMIT 10').fetchall()
+    texte='\n'.join(f'**{date[:16]}** <@{admin}> → <@{uid}> : {action} — {details}' for date,admin,uid,action,details in rows) or 'Aucune action journalisée.'
+    await i.response.send_message(embed=discord.Embed(title='📋 Journal administratif',description=texte[:4000],color=discord.Color.blue()),ephemeral=True)
 
 def marche_panneau():
     with db_open() as db: marche = marche_actuel(db)
@@ -642,6 +731,7 @@ async def cmd_activer(i:discord.Interaction,objet:str):
 @bot.tree.command(name='miroir_voir',description='Prévoir un cadeau avec ton miroir')
 @app_commands.describe(choix='1 Friandise, 2 Coffre, 3 Pacte')
 async def cmd_miroir(i:discord.Interaction,choix:int):
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
     if choix not in CADEAUX: return await i.response.send_message('Choisis 1, 2 ou 3.',ephemeral=True)
     uid=i.user.id
     with db_open() as db:
@@ -659,6 +749,7 @@ async def cmd_miroir(i:discord.Interaction,choix:int):
     await i.response.send_message(msg,ephemeral=True)
 @bot.tree.command(name='renoncer_cadeau',description='Renoncer après consultation du miroir')
 async def cmd_renoncer(i:discord.Interaction):
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE');key=f'miroir:{i.user.id}'
         if not db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(key,)).fetchone(): msg='Tu n’as pas de prévision active.'
@@ -670,6 +761,7 @@ async def cmd_renoncer(i:discord.Interaction):
     await i.response.send_message(msg,ephemeral=True)
 @bot.tree.command(name='rejouer',description='Utiliser le sablier pour rejouer le cadeau du jour')
 async def cmd_rejouer(i:discord.Interaction):
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
     uid=i.user.id
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE');actuel=balance(db,uid)
@@ -694,6 +786,7 @@ async def cmd_rejouer(i:discord.Interaction):
 @app_commands.guild_only()
 async def admin_ouvrir_marche(i:discord.Interaction):
     if not staff(i): return await i.response.send_message('Réservé au staff.',ephemeral=True)
+    if jeu_termine(): return await i.response.send_message(MESSAGE_FIN,ephemeral=True)
     with db_open() as db:
         db.execute('BEGIN IMMEDIATE')
         if marche_actuel(db): msg='Le marché est déjà ouvert.';ok=False
@@ -714,7 +807,7 @@ EVENEMENTS={5:('hotte','🎁 La Hotte des Regrets'),12:('casino','🎰 Le Casino
 def evenement_actuel():
     t=now()
     if t.month!=12 or t.day not in EVENEMENTS or t.year!=2026: return None
-    if t.day==24 and t.hour>=21: return None
+    if jeu_termine(): return None
     return EVENEMENTS[t.day]
 def resultat_evenement(code, choix):
     """Tirage commun au jeu réel et à sa simulation, sans effet de bord."""
@@ -739,6 +832,7 @@ def resultat_evenement(code, choix):
     return delta,detail
 
 def jouer_evenement(uid,choix):
+    if jeu_termine(): return MESSAGE_FIN,False,None
     ev=evenement_actuel()
     if not ev: return '🎪 Aucun grand événement ouvert actuellement.',False,None
     code,nom=ev
@@ -847,14 +941,14 @@ async def entretien_marche():
                     if not db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(cle,)).fetchone():
                         db.execute('INSERT INTO etat_marche(cle,valeur) VALUES (?,?)',(cle,'1'))
                         fermeture=True
-                for uid,echeance,montant in db.execute('SELECT user_id,echeance,montant FROM dettes WHERE echeance<=?',(d,)).fetchall():
+                for uid,echeance,montant in ([] if jeu_termine() else db.execute('SELECT user_id,echeance,montant FROM dettes WHERE echeance<=?',(d,)).fetchall()):
                     avant=balance(db,uid);paye=min(avant,montant)
                     db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?',(paye,uid))
                     db.execute('DELETE FROM dettes WHERE user_id=? AND echeance=?',(uid,echeance))
                     if montant>paye:
                         demain=(t.date()+timedelta(days=1)).isoformat()
                         db.execute('INSERT INTO dettes(user_id,echeance,montant) VALUES (?,?,?) ON CONFLICT(user_id,echeance) DO UPDATE SET montant=montant+excluded.montant',(uid,demain,montant-paye))
-                if t.year==2026 and t.month==12 and t.day==24:
+                if not jeu_termine() and t.year==2026 and t.month==12 and t.day==24:
                     for (uid,) in db.execute("SELECT user_id FROM inventaire WHERE objet='noir_canard' AND quantite>0").fetchall():
                         cle=f'canard_bonus:{uid}'
                         if not db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(cle,)).fetchone():
