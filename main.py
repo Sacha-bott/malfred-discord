@@ -2,6 +2,9 @@ import os
 import random
 import sqlite3
 import logging
+import asyncio
+from datetime import timedelta
+from discord.ext import tasks
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -14,6 +17,19 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0') or '0')
 STAFF_IDS = {int(x.strip()) for x in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 TZ = ZoneInfo('Europe/Zurich')
+MARKET_CHANNEL_ID = int(os.getenv('MALFRED_CHANNEL_ID', '0') or '0')
+
+# Emotes personnalisées officielles du serveur La Salle de Bain.
+MALFRED_EMOTES = {
+    'amoureux': '<:malfred_amoureux:1573298335266115614>',
+    'flocon': '<:malfred_flocon:157329811219109948>',
+    'fume': '<:malfred_fume:1573298043090899164>',
+    'machiavelique': '<:malfred_machiavelique:1573297932361408594>',
+    'moquerie': '<:malfred_moquerie:1573298266936709150>',
+    'mort': '<:malfred_mort:1573298187677208596>',
+    'riche': '<:malfred_riche:1573297742925799504>',
+    'triste': '<:malfred_triste:1573297857728090203>',
+}
 
 intents = discord.Intents.default()
 # Pas de message_content, ni de members intent : commandes / et boutons uniquement.
@@ -114,6 +130,13 @@ def initialiser_base():
             quantite INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (user_id, objet)
         )''')
+        db.execute('''CREATE TABLE IF NOT EXISTS activations (user_id INTEGER PRIMARY KEY, trefle INTEGER DEFAULT 0, bouclier INTEGER DEFAULT 0, miroir INTEGER DEFAULT 0, corrompu INTEGER DEFAULT 0, dernier_resultat TEXT, sablier_utilise TEXT, blocage_cadeau TEXT, dette INTEGER DEFAULT 0)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS marches (id INTEGER PRIMARY KEY AUTOINCREMENT, debut TEXT NOT NULL, fin TEXT NOT NULL, offres TEXT NOT NULL)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS achats_noirs (marche_id INTEGER, user_id INTEGER, nombre INTEGER DEFAULT 0, PRIMARY KEY(marche_id,user_id))''')
+        db.execute('''CREATE TABLE IF NOT EXISTS etat_marche (cle TEXT PRIMARY KEY, valeur TEXT NOT NULL)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS tirages (user_id INTEGER PRIMARY KEY, jour TEXT, choix INTEGER, solde_avant INTEGER, resultat INTEGER, montant INTEGER, rejoue INTEGER DEFAULT 0)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS dettes (user_id INTEGER, echeance TEXT, montant INTEGER, PRIMARY KEY(user_id,echeance))''')
+
 
 
 def creer_joueur(db, user_id):
@@ -142,16 +165,33 @@ def ouvrir_cadeau(user_id, choix):
         solde, dernier = db.execute('SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id=?', (user_id,)).fetchone()
         if dernier == aujourd_hui():
             return '🎄 ' + phrase('deja'), discord.Color.orange(), False
-        bonus = 15 if possede(db, user_id, 'trefle') else 0
+        db.execute('INSERT OR IGNORE INTO activations(user_id) VALUES (?)', (user_id,))
+        trefle, bouclier_actif, corrompu, blocage = db.execute('SELECT trefle,bouclier,corrompu,blocage_cadeau FROM activations WHERE user_id=?', (user_id,)).fetchone()
+        if blocage == aujourd_hui():
+            return '🎲 Ton dé du désespoir a sacrifié le cadeau du jour.', discord.Color.orange(), False
+        bonus = 15 if trefle else 0
         if bonus:
             retirer_objet(db, user_id, 'trefle')
-        victoire = random.randint(1, 100) <= chance + bonus
+            db.execute('UPDATE activations SET trefle=0 WHERE user_id=?', (user_id,))
+        prevision=db.execute('SELECT valeur FROM etat_marche WHERE cle=?',(f'miroir:{user_id}',)).fetchone()
+        if prevision and prevision[0].startswith(str(choix)+':'):
+            victoire=prevision[0].endswith(':gain')
+            db.execute('DELETE FROM etat_marche WHERE cle=?',(f'miroir:{user_id}',))
+        else:
+            victoire = random.randint(1, 100) <= chance + bonus
         montant = random.randint(*(gains if victoire else pertes))
-        protege = not victoire and possede(db, user_id, 'bouclier')
+        protege = not victoire and bool(bouclier_actif)
         if protege:
             retirer_objet(db, user_id, 'bouclier')
+            db.execute('UPDATE activations SET bouclier=0 WHERE user_id=?', (user_id,))
+        if not victoire and corrompu:
+            montant = max(0, montant - 10)
+            db.execute('UPDATE activations SET corrompu=0 WHERE user_id=?', (user_id,))
+            retirer_objet(db, user_id, 'noir_trefle')
         nouveau = solde + montant if victoire else (solde if protege else max(0, solde - montant))
         db.execute('UPDATE joueurs SET flocons=?, dernier_cadeau=? WHERE user_id=?', (nouveau, aujourd_hui(), user_id))
+        db.execute('UPDATE activations SET dernier_resultat=? WHERE user_id=?', (str(choix), user_id))
+        db.execute('INSERT INTO tirages(user_id,jour,choix,solde_avant,resultat,montant,rejoue) VALUES (?,?,?,?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET jour=excluded.jour,choix=excluded.choix,solde_avant=excluded.solde_avant,resultat=excluded.resultat,montant=excluded.montant,rejoue=0', (user_id,aujourd_hui(),choix,solde,nouveau, nouveau-solde))
     if victoire:
         bilan = f'🎉 **+{nouveau - solde} flocons !**\n{phrase("gain")}'
         couleur = discord.Color.green()
@@ -200,7 +240,7 @@ def utiliser_boule(user_id):
         retirer_objet(db, user_id, 'boule')
         montant = random.randint(-5, 10)
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
-        protege = montant < 0 and possede(db, user_id, 'bouclier')
+        protege = False  # Le bouclier activé protège uniquement un cadeau quotidien.
         if protege:
             retirer_objet(db, user_id, 'bouclier')
         nouveau = solde if protege else max(0, solde + montant)
@@ -261,9 +301,9 @@ def embed_inventaire(user):
         creer_joueur(db, user.id)
         objets = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet', (user.id,)).fetchall()
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user.id,)).fetchone()[0]
-    contenu = '\n'.join(OBJETS[code][0] for (code,) in objets if code in OBJETS)
+    contenu = '\n'.join((OBJETS[code][0] if code in OBJETS else NOIR[code][0] if code in NOIR else code)+f' (`{code}`)' for (code,) in objets)
     return discord.Embed(title=f'🎒 Inventaire de {user.display_name}',
-        description=(contenu or 'C’est vide. Même les mites ont déménagé.') + f'\n\n❄️ **{solde} flocons**',
+        description=(contenu or 'C’est vide. Même les mites ont déménagé.') + f"\n\n{MALFRED_EMOTES['flocon']} **{solde} flocons**",
         color=discord.Color.gold())
 
 
@@ -273,7 +313,7 @@ def embed_classement(guild):
     # Classement de tous les joueurs enregistrés dans cette base.
     top = scores[:10]
     description = '\n'.join(f'**{i}.** <@{uid}> — **{score} ❄️**' for i, (uid, score) in enumerate(top, 1))
-    return discord.Embed(title='🏆 LES FORTUNES DU PÔLE NORD',
+    return discord.Embed(title=f"{MALFRED_EMOTES['riche']} LES FORTUNES DU PÔLE NORD",
         description=description or 'Personne à plumer pour le moment.', color=discord.Color.gold())
 
 
@@ -457,12 +497,265 @@ async def cmd_admin_reset(interaction: discord.Interaction, joueur: discord.User
         f'✅ Cadeau quotidien réinitialisé pour {joueur.mention}. **Ses flocons sont inchangés.**', ephemeral=True)
 
 
+
+# --- MARCHÉ NOIR : catalogue indépendant de la boutique normale ---
+# Les prix et effets sont affichés avant achat. Aucune monnaie réelle.
+NOIR = {
+    'noir_trefle': ('🍀 Trèfle corrompu', '8 ❄️', 'Réduit de 10 la prochaine perte sur cadeau, après activation.'),
+    'noir_miroir': ('🪞 Miroir du tricheur', '1 objet à sacrifier', 'Révèle victoire ou défaite du prochain cadeau; renoncer consomme le cadeau.'),
+    'noir_chaussette': ('🧦 Chaussette maudite', '5 ❄️', '0 à 10 flocons lors de son utilisation.'),
+    'noir_potion': ('🧪 Potion du dernier espoir', 'Gratuite si moitié basse', '5 à 10 flocons de rattrapage, une fois sur tout l’événement.'),
+    'noir_de': ('🎲 Dé du désespoir', 'Cadeau de demain', '50 % de chances de gagner 12 flocons, sinon 0; bloque demain.'),
+    'noir_contrat': ('📜 Contrat douteux', '10 ❄️', 'Reçoit 15 flocons; dette de 8 flocons dans trois jours.'),
+    'noir_canard': ('🦆 Canard doré', '20 ❄️', 'Collection; bonus de 5 flocons appliqué une seule fois le 24 décembre.'),
+    'noir_sablier': ('⌛ Sablier volé', '12 ❄️', 'Rejoue une fois le cadeau du jour; le second résultat remplace le premier.'),
+}
+
+def now_ch():
+    return datetime.now(TZ)
+
+def marche_actuel(db):
+    return db.execute('SELECT id,fin,offres FROM marches WHERE debut<=? AND fin>? ORDER BY id DESC LIMIT 1', (now_ch().isoformat(), now_ch().isoformat())).fetchone()
+
+def ajouter_objet(db, uid, code):
+    db.execute('INSERT INTO inventaire(user_id,objet,quantite) VALUES (?,?,1) ON CONFLICT(user_id,objet) DO UPDATE SET quantite=quantite+1', (uid,code))
+
+def quantite(db, uid, code):
+    row=db.execute('SELECT quantite FROM inventaire WHERE user_id=? AND objet=?',(uid,code)).fetchone()
+    return row[0] if row else 0
+
+def consommer(db, uid, code):
+    if quantite(db,uid,code)<1: return False
+    db.execute('UPDATE inventaire SET quantite=quantite-1 WHERE user_id=? AND objet=?',(uid,code))
+    db.execute('DELETE FROM inventaire WHERE user_id=? AND objet=? AND quantite<=0',(uid,code))
+    return True
+
+def achat_noir(uid, code, sacrifice=None):
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        marche=marche_actuel(db)
+        if not marche: return '🕯️ Marché fermé. Tu arrives après la fête.',False
+        mid,_,offres=marche
+        if code not in offres.split(','): return 'Cet objet n’est pas proposé aujourd’hui.',False
+        creer_joueur(db,uid)
+        count=db.execute('SELECT nombre FROM achats_noirs WHERE marche_id=? AND user_id=?',(mid,uid)).fetchone()
+        if count and count[0]>=2: return 'Deux achats maximum pendant cette ouverture.',False
+        if quantite(db,uid,code): return 'Tu possèdes déjà cet objet.',False
+        if code=='noir_potion':
+            if db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(f'potion:{uid}',)).fetchone(): return 'Tu as déjà reçu une potion pendant cet événement.',False
+            rang=db.execute('SELECT COUNT(*) FROM joueurs WHERE flocons>(SELECT flocons FROM joueurs WHERE user_id=?)',(uid,)).fetchone()[0]
+            total=db.execute('SELECT COUNT(*) FROM joueurs').fetchone()[0]
+            if rang < total//2: return 'Réservé à la moitié basse du classement.',False
+        elif code=='noir_miroir':
+            if not sacrifice or sacrifice==code or quantite(db,uid,sacrifice)<1: return 'Choisis un objet possédé à sacrifier.',False
+            consommer(db,uid,sacrifice)
+        elif code=='noir_de':
+            if now_ch().date().day>=24 and now_ch().month==12: return 'Trop tard pour sacrifier demain.',False
+            db.execute('INSERT OR IGNORE INTO activations(user_id) VALUES (?)',(uid,))
+            demain=(now_ch().date()+timedelta(days=1)).isoformat()
+            db.execute('UPDATE activations SET blocage_cadeau=? WHERE user_id=?',(demain,uid))
+        else:
+            prix={'noir_trefle':8,'noir_chaussette':5,'noir_contrat':10,'noir_canard':20,'noir_sablier':12}.get(code,0)
+            solde=db.execute('SELECT flocons FROM joueurs WHERE user_id=?',(uid,)).fetchone()[0]
+            if solde<prix: return f'Il te manque {prix-solde} flocons.',False
+            db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?',(prix,uid))
+        ajouter_objet(db,uid,code)
+        db.execute('INSERT INTO achats_noirs(marche_id,user_id,nombre) VALUES (?,?,1) ON CONFLICT(marche_id,user_id) DO UPDATE SET nombre=nombre+1',(mid,uid))
+        if code=='noir_potion': db.execute('INSERT INTO etat_marche(cle,valeur) VALUES (?,?)',(f'potion:{uid}','1'))
+        return f'🕯️ **{NOIR[code][0]}** acheté ! {phrase("achat")}',True
+
+def activer(uid,code):
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        creer_joueur(db,uid)
+        db.execute('INSERT OR IGNORE INTO activations(user_id) VALUES (?)',(uid,))
+        if quantite(db,uid,code)<1: return 'Tu ne possèdes pas cet objet.',False
+        if code in ('trefle','bouclier','noir_trefle'):
+            col={'trefle':'trefle','bouclier':'bouclier','noir_trefle':'corrompu'}[code]
+            db.execute(f'UPDATE activations SET {col}=1 WHERE user_id=?',(uid,))
+            return '✨ Objet activé : il sera consommé au prochain cadeau concerné.',True
+        if code=='noir_miroir':
+            # Prévisualisation simple : un tirage fixé au moment de l'activation.
+            return '🪞 Utilise `/miroir_voir` pour choisir le cadeau à observer.',False
+        if code=='noir_sablier': return '⌛ Utilise `/rejouer` après avoir ouvert un cadeau aujourd’hui.',False
+        if code=='noir_canard': return '🦆 Ce canard reste dans ton inventaire jusqu’à la finale.',False
+        consommer(db,uid,code)
+        solde=db.execute('SELECT flocons FROM joueurs WHERE user_id=?',(uid,)).fetchone()[0]
+        gain=0
+        if code=='noir_chaussette': gain=random.randint(0,10)
+        if code=='noir_potion': gain=random.randint(5,10)
+        if code=='noir_de': gain=12 if random.random()<0.5 else 0
+        if code=='noir_contrat':
+            gain=15
+            echeance=(now_ch().date()+timedelta(days=3)).isoformat()
+            db.execute('INSERT INTO dettes(user_id,echeance,montant) VALUES (?,?,8) ON CONFLICT(user_id,echeance) DO UPDATE SET montant=montant+8',(uid,echeance))
+        db.execute('UPDATE joueurs SET flocons=flocons+? WHERE user_id=?',(gain,uid))
+        return f'{NOIR[code][0]} : **+{gain} ❄️**. Nouveau solde : **{solde+gain}**.',True
+
+class MarcheSelect(discord.ui.Select):
+    def __init__(self,offres):
+        super().__init__(placeholder='Choisir une marchandise...', options=[discord.SelectOption(label=NOIR[k][0][:90],value=k,description=(NOIR[k][1]+' • '+NOIR[k][2])[:100]) for k in offres],custom_id='malfred:marche:selection')
+    async def callback(self,interaction):
+        code=self.values[0]
+        await interaction.response.send_message(f'**{NOIR[code][0]}**\n{NOIR[code][2]}\nCoût : {NOIR[code][1]}\nConfirmer ?',view=MarcheConfirm(code),ephemeral=True)
+
+class MarcheConfirm(discord.ui.View):
+    def __init__(self,code):
+        super().__init__(timeout=120);self.code=code
+    @discord.ui.button(label='Confirmer',style=discord.ButtonStyle.success)
+    async def oui(self,interaction,button):
+        if self.code=='noir_miroir':
+            with connexion() as db:
+                options=[discord.SelectOption(label=(OBJETS[k][0] if k in OBJETS else NOIR[k][0])[:90],value=k) for k,q in db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=?',(interaction.user.id,)) if q>0 and k!='noir_miroir']
+            if not options:
+                await interaction.response.edit_message(content='Tu n’as aucun objet à sacrifier.',view=None);return
+            await interaction.response.edit_message(content='Quel objet sacrifier ?',view=SacrificeView(options),embed=None);return
+        msg,ok=achat_noir(interaction.user.id,self.code)
+        await interaction.response.edit_message(content=msg,view=None,embed=None)
+        if ok: await annoncer_publiquement(interaction,'🕯️ ACHAT CLANDESTIN',msg,discord.Color.dark_purple())
+
+class SacrificeSelect(discord.ui.Select):
+    def __init__(self,options): super().__init__(placeholder='Objet à sacrifier',options=options)
+    async def callback(self,interaction):
+        msg,ok=achat_noir(interaction.user.id,'noir_miroir',self.values[0]);await interaction.response.edit_message(content=msg,view=None)
+        if ok: await annoncer_publiquement(interaction,'🕯️ ÉCHANGE CLANDESTIN',msg,discord.Color.dark_purple())
+class SacrificeView(discord.ui.View):
+    def __init__(self,options): super().__init__(timeout=120);self.add_item(SacrificeSelect(options))
+class MarcheView(discord.ui.View):
+    def __init__(self,offres): super().__init__(timeout=300);self.add_item(MarcheSelect(offres))
+
+@bot.tree.command(name='marche',description='Voir le Marché Noir surprise de Malfred')
+async def cmd_marche(interaction:discord.Interaction):
+    with connexion() as db: marche=marche_actuel(db)
+    if not marche:
+        await interaction.response.send_message('🕯️ Le Marché Noir est fermé. Malfred a disparu dans une ruelle.',ephemeral=True);return
+    mid,fin,offres=marche;codes=offres.split(',')
+    e=discord.Embed(title=f"{MALFRED_EMOTES['machiavelique']} MALFRED ET SON MARCHÉ NOIR",description='Stock illimité • 2 achats par joueur et par ouverture\nFerme à '+fin+' (heure suisse)\n\n'+'\n'.join(f'**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}' for k in codes),color=discord.Color.dark_purple())
+    await interaction.response.send_message(embed=e,view=MarcheView(codes),ephemeral=True)
+
+@bot.tree.command(name='activer',description='Activer manuellement un objet de ton inventaire')
+@app_commands.describe(objet='Code de l’objet, visible avec /inventaire')
+async def cmd_activer(interaction:discord.Interaction,objet:str):
+    msg,ok=activer(interaction.user.id,objet.strip().lower()) if objet in OBJETS or objet in NOIR else ('Objet inconnu.',False)
+    await interaction.response.send_message(msg,ephemeral=not ok)
+    if ok: await annoncer_publiquement(interaction,'🎒 OBJET ACTIVÉ',msg,discord.Color.purple())
+
+@bot.tree.command(name='miroir_voir',description='Prévoir le résultat d’un cadeau avec ton miroir')
+@app_commands.describe(choix='1 Friandise, 2 Coffre, 3 Pacte')
+async def cmd_miroir(interaction:discord.Interaction,choix:int):
+    if choix not in CADEAUX:
+        await interaction.response.send_message('Choisis 1, 2 ou 3.',ephemeral=True);return
+    uid=interaction.user.id
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE');creer_joueur(db,uid)
+        if not quantite(db,uid,'noir_miroir'):
+            await interaction.response.send_message('Tu ne possèdes pas de miroir.',ephemeral=True);return
+        if db.execute('SELECT dernier_cadeau FROM joueurs WHERE user_id=?',(uid,)).fetchone()[0]==aujourd_hui():
+            await interaction.response.send_message('Tu as déjà ouvert ton cadeau.',ephemeral=True);return
+        chance=CADEAUX[choix][0]
+        active=db.execute('SELECT trefle FROM activations WHERE user_id=?',(uid,)).fetchone()
+        victoire=random.randint(1,100)<=chance+(15 if active and active[0] else 0)
+        consommer(db,uid,'noir_miroir')
+        db.execute('INSERT OR REPLACE INTO etat_marche(cle,valeur) VALUES (?,?)',(f'miroir:{uid}',f'{choix}:'+('gain' if victoire else 'perte')))
+    await interaction.response.send_message(f'🪞 Pour **{CADEAUX[choix][3]}**, le miroir annonce **'+('un gain' if victoire else 'une perte')+'**. Ouvre ce cadeau ou renonce. Un autre choix ne bénéficie pas de la prévision.',ephemeral=True)
+
+@bot.tree.command(name='renoncer_cadeau',description='Renoncer au cadeau du jour après consultation du miroir')
+async def cmd_renoncer(interaction:discord.Interaction):
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE');key=f'miroir:{interaction.user.id}'
+        if not db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(key,)).fetchone():
+            await interaction.response.send_message('Tu n’as pas utilisé de miroir.',ephemeral=True);return
+        creer_joueur(db,interaction.user.id)
+        db.execute('UPDATE joueurs SET dernier_cadeau=? WHERE user_id=?',(aujourd_hui(),interaction.user.id))
+        db.execute('DELETE FROM etat_marche WHERE cle=?',(key,))
+    await interaction.response.send_message('🪞 Tu renonces à ton cadeau du jour.',ephemeral=True)
+
+@bot.tree.command(name='rejouer',description='Utiliser le sablier pour retenter le cadeau du jour')
+async def cmd_rejouer(interaction:discord.Interaction):
+    uid=interaction.user.id
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE');creer_joueur(db,uid)
+        tirage=db.execute('SELECT jour,choix,solde_avant,resultat,rejoue FROM tirages WHERE user_id=?',(uid,)).fetchone()
+        if not tirage or tirage[0]!=aujourd_hui() or tirage[4]:
+            await interaction.response.send_message('⌛ Aucun cadeau du jour à rejouer, ou sablier déjà utilisé.',ephemeral=True);return
+        if not quantite(db,uid,'noir_sablier'):
+            await interaction.response.send_message('Tu n’as pas de sablier.',ephemeral=True);return
+        _,choix,avant,apres,_=tirage
+        actuel=db.execute('SELECT flocons FROM joueurs WHERE user_id=?',(uid,)).fetchone()[0]
+        chance,gains,pertes,nom=CADEAUX[choix]
+        victoire=random.randint(1,100)<=chance
+        montant=random.randint(*(gains if victoire else pertes))
+        difference=montant if victoire else -montant
+        # Les autres opérations intervenues depuis le cadeau sont conservées.
+        nouveau=max(0,actuel-(apres-avant)+difference)
+        db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?',(nouveau,uid))
+        db.execute('UPDATE tirages SET rejoue=1,resultat=?,montant=? WHERE user_id=?',(nouveau,difference,uid))
+        consommer(db,uid,'noir_sablier')
+    await interaction.response.send_message('⌛ Le sablier a été utilisé ! Résultat publié dans le salon.',ephemeral=True)
+    await annoncer_publiquement(interaction,'⌛ LE SABLIER A PARLÉ',f'{nom} : **{difference:+d} ❄️** sur le second tirage. Solde : **{nouveau} ❄️**.',discord.Color.gold())
+
+@bot.tree.command(name='admin_ouvrir_marche',description='Staff : ouvrir le Marché Noir pour six heures (test)')
+@app_commands.guild_only()
+async def admin_ouvrir_marche(interaction:discord.Interaction):
+    if not est_staff(interaction):
+        await interaction.response.send_message('Réservé au staff.',ephemeral=True);return
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        if marche_actuel(db):
+            await interaction.response.send_message('Le marché est déjà ouvert.',ephemeral=True);return
+        debut=now_ch();fin=debut+timedelta(hours=6)
+        offres=','.join(random.sample(list(NOIR),4))
+        db.execute('INSERT INTO marches(debut,fin,offres) VALUES (?,?,?)',(debut.isoformat(),fin.isoformat(),offres))
+    await interaction.response.send_message('🕯️ Marché de test ouvert pendant six heures ! Utilisez `/marche`.',ephemeral=True)
+    await annoncer_publiquement(interaction,'🕯️ MARCHÉ NOIR OUVERT','Six heures pour découvrir les marchandises ! `/marche`',discord.Color.dark_purple())
+
+async def entretien_marche():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            if MARKET_CHANNEL_ID:
+                with connexion() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    maintenant=now_ch();jour=maintenant.date().isoformat()
+                    fait=db.execute('SELECT valeur FROM etat_marche WHERE cle=?',('tirage:'+jour,)).fetchone()
+                    if not fait and maintenant.month==12 and 1<=maintenant.day<=24 and maintenant.hour>=10:
+                        db.execute('INSERT INTO etat_marche(cle,valeur) VALUES (?,?)',('tirage:'+jour,'1'))
+                        n=db.execute('SELECT COUNT(*) FROM marches').fetchone()[0]
+                        dernier=db.execute('SELECT fin FROM marches ORDER BY id DESC LIMIT 1').fetchone()
+                        eligible=n<4 and (not dernier or (maintenant-datetime.fromisoformat(dernier[0])).total_seconds()>=48*3600)
+                        jours_restants=24-maintenant.day
+                        chance=0.19 if n<2 else 0.07
+                        if n<2 and jours_restants<=max(0,(2-n)*3): chance=1.0
+                        if eligible and random.random()<chance:
+                            offres=','.join(random.sample(list(NOIR),4))
+                            fin=(maintenant+timedelta(hours=6)).isoformat()
+                            db.execute('INSERT INTO marches(debut,fin,offres) VALUES (?,?,?)',(maintenant.isoformat(),fin,offres))
+                            salon=bot.get_channel(MARKET_CHANNEL_ID)
+                            if salon:
+                                try: await salon.send(f"{MALFRED_EMOTES['machiavelique']} **LE MARCHÉ NOIR DE MALFRED EST OUVERT !**\nSix heures pour négocier avec le pire commerçant du pôle Nord. Utilisez `/marche` .")
+                                except discord.HTTPException: logging.exception('Annonce marché impossible')
+                    # Dettes dues, solde jamais négatif; report du reste.
+                    dettes=db.execute('SELECT user_id,echeance,montant FROM dettes WHERE echeance<=?',(jour,)).fetchall()
+                    for uid,date,montant in dettes:
+                        creer_joueur(db,uid)
+                        solde=db.execute('SELECT flocons FROM joueurs WHERE user_id=?',(uid,)).fetchone()[0]
+                        paye=min(solde,montant)
+                        db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?',(paye,uid))
+                        db.execute('DELETE FROM dettes WHERE user_id=? AND echeance=?',(uid,date))
+                        if montant>paye:
+                            nouveau=(maintenant.date()+timedelta(days=1)).isoformat()
+                            db.execute('INSERT INTO dettes VALUES (?,?,?) ON CONFLICT(user_id,echeance) DO UPDATE SET montant=montant+excluded.montant',(uid,nouveau,montant-paye))
+        except Exception: logging.exception('Entretien Marché Noir')
+        await asyncio.sleep(900)
+
+
 # Les commandes ont été déclarées sur bot : on utilise setup_hook sur cette même instance.
 async def setup_hook():
     bot.add_view(AccueilView())
     bot.add_view(CadeauxView())
     bot.add_view(BoutiqueView())
     bot.add_view(InventaireView())
+    bot.loop.create_task(entretien_marche())
     if GUILD_ID:
         serveur = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=serveur)
