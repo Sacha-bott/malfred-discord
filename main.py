@@ -37,7 +37,11 @@ MALFRED_IDS = {k: int(v.rsplit(':', 1)[1][:-1]) for k, v in MALFRED_EMOTES.items
 def portrait_malfred(humeur):
     return f"https://cdn.discordapp.com/emojis/{MALFRED_IDS[humeur]}.png?size=256&quality=lossless"
 def illustrer(embed, humeur):
-    embed.set_thumbnail(url=portrait_malfred(humeur))
+    # Les grandes illustrations 16:9 nécessitent une URL publique de l'image originale.
+    # Exemple Railway : MALFRED_IMAGE_ACCUEIL=https://.../accueil.png
+    image_url = os.getenv('MALFRED_IMAGE_' + humeur.upper(), '').strip()
+    if image_url.startswith(('https://', 'http://')):
+        embed.set_image(url=image_url)
     return embed
 
 intents = discord.Intents.default()
@@ -280,10 +284,10 @@ async def annoncer_publiquement(interaction, titre, texte, couleur):
 def embed_accueil():
     e = discord.Embed(title=f"{MALFRED_EMOTES['machiavelique']} MALFRED — LE LUTIN DU CHAOS",
         description=f'{phrase("accueil")} 😈\n\nChoisis une activité ci-dessous :', color=discord.Color.dark_green())
-    e.add_field(name='🎁 Cadeaux', value='Un pari chaque jour', inline=True)
-    e.add_field(name='🛒 Boutique', value='Dépense tes flocons', inline=True)
-    e.add_field(name='🎒 Inventaire', value='Tes trouvailles douteuses', inline=True)
-    e.add_field(name='🏆 Classement', value='Les plus riches', inline=True)
+    e.add_field(name=f'{MALFRED_EMOTES['amoureux']} Cadeaux', value='Un pari chaque jour', inline=True)
+    e.add_field(name=f'{MALFRED_EMOTES['riche']} Boutique', value='Dépense tes flocons', inline=True)
+    e.add_field(name=f'{MALFRED_EMOTES['machiavelique']} Inventaire', value='Tes trouvailles douteuses', inline=True)
+    e.add_field(name=f'{MALFRED_EMOTES['riche']} Classement', value='Les plus riches', inline=True)
     e.set_footer(text='Malfred décline toute responsabilité pour tes décisions.')
     return illustrer(e, 'machiavelique')
 
@@ -291,9 +295,9 @@ def embed_accueil():
 def embed_cadeaux():
     e = discord.Embed(title=f"{MALFRED_EMOTES['amoureux']} LES CADEAUX PIÉGÉS",
         description=f'{phrase("cadeaux")} 😈\n**Un cadeau par jour.**', color=discord.Color.red())
-    e.add_field(name='🍬 Friandise suspecte · 70 %', value='🟢 Gain : **2 à 5** ❄️\n🔻 Perte : **1 à 3** ❄️', inline=False)
-    e.add_field(name='🧰 Coffre du filou · 50 %', value='🟡 Gain : **5 à 12** ❄️\n🔻 Perte : **4 à 8** ❄️', inline=False)
-    e.add_field(name='💀 Pacte maudit · 30 %', value='🔴 Gain : **15 à 30** ❄️\n🔻 Perte : **8 à 15** ❄️', inline=False)
+    e.add_field(name=f"{MALFRED_EMOTES['amoureux']} Friandise suspecte · 70 %", value='🟢 Gain : **2 à 5** ❄️\n🔻 Perte : **1 à 3** ❄️', inline=False)
+    e.add_field(name=f"{MALFRED_EMOTES['riche']} Coffre du filou · 50 %", value='🟡 Gain : **5 à 12** ❄️\n🔻 Perte : **4 à 8** ❄️', inline=False)
+    e.add_field(name=f"{MALFRED_EMOTES['mort']} Pacte maudit · 30 %", value='🔴 Gain : **15 à 30** ❄️\n🔻 Perte : **8 à 15** ❄️', inline=False)
     e.set_footer(text='Choisis directement avec les boutons sous cet encadré.')
     return illustrer(e, 'amoureux')
 
@@ -344,15 +348,15 @@ class CadeauxView(discord.ui.View):
         await interaction.followup.send('🎄 Ton résultat est visible par tout le salon !' if publie else
                                         '⚠️ Cadeau enregistré, mais Malfred ne peut pas publier ici. Vérifie ses permissions.', ephemeral=True)
 
-    @discord.ui.button(label='Friandise suspecte', emoji='🍬', style=discord.ButtonStyle.success, custom_id='malfred:ouvrir:1')
+    @discord.ui.button(label='Friandise suspecte', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['amoureux']), style=discord.ButtonStyle.success, custom_id='malfred:ouvrir:1')
     async def choix1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.jouer(interaction, 1)
 
-    @discord.ui.button(label='Coffre du filou', emoji='🧰', style=discord.ButtonStyle.primary, custom_id='malfred:ouvrir:2')
+    @discord.ui.button(label='Coffre du filou', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['riche']), style=discord.ButtonStyle.primary, custom_id='malfred:ouvrir:2')
     async def choix2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.jouer(interaction, 2)
 
-    @discord.ui.button(label='Pacte maudit', emoji='💀', style=discord.ButtonStyle.danger, custom_id='malfred:ouvrir:3')
+    @discord.ui.button(label='Pacte maudit', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['mort']), style=discord.ButtonStyle.danger, custom_id='malfred:ouvrir:3')
     async def choix3(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.jouer(interaction, 3)
 
@@ -362,7 +366,7 @@ class ConfirmerAchat(discord.ui.View):
         super().__init__(timeout=120)
         self.objet = objet
 
-    @discord.ui.button(label='Confirmer', emoji='💰', style=discord.ButtonStyle.success)
+    @discord.ui.button(label='Confirmer', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['riche']), style=discord.ButtonStyle.success)
     async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
         resultat, reussi = effectuer_achat(interaction.user.id, self.objet)
         await interaction.response.edit_message(content=('✅ Achat effectué ! Regarde dans le salon.' if reussi else resultat), embed=None, view=None)
@@ -396,11 +400,11 @@ class BoutiqueView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(ChoixObjet())
 
-    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:inventaire', row=1)
+    @discord.ui.button(label='Inventaire', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['machiavelique']), style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:inventaire', row=1)
     async def inventaire(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=embed_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
 
-    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:flocons', row=1)
+    @discord.ui.button(label='Mes flocons', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['flocon']), style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:flocons', row=1)
     async def flocons(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(f'❄️ Tu as **{solde_joueur(interaction.user.id)} flocons**.', ephemeral=True)
 
@@ -409,7 +413,7 @@ class InventaireView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label='Utiliser la boule à neige', emoji='🔮', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire:boule')
+    @discord.ui.button(label='Utiliser la boule à neige', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['flocon']), style=discord.ButtonStyle.primary, custom_id='malfred:inventaire:boule')
     async def boule(self, interaction: discord.Interaction, button: discord.ui.Button):
         resultat, reussi = utiliser_boule(interaction.user.id)
         if not reussi:
@@ -425,23 +429,23 @@ class AccueilView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label='Cadeaux', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:menu:cadeaux')
+    @discord.ui.button(label='Cadeaux', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['amoureux']), style=discord.ButtonStyle.success, custom_id='malfred:menu:cadeaux')
     async def cadeaux(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=embed_cadeaux(), view=CadeauxView(), ephemeral=True)
 
-    @discord.ui.button(label='Boutique', emoji='🛒', style=discord.ButtonStyle.primary, custom_id='malfred:menu:boutique')
+    @discord.ui.button(label='Boutique', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['riche']), style=discord.ButtonStyle.primary, custom_id='malfred:menu:boutique')
     async def boutique(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=embed_boutique(), view=BoutiqueView(), ephemeral=True)
 
-    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:inventaire')
+    @discord.ui.button(label='Inventaire', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['machiavelique']), style=discord.ButtonStyle.secondary, custom_id='malfred:menu:inventaire')
     async def inventaire(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=embed_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
 
-    @discord.ui.button(label='Classement', emoji='🏆', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
+    @discord.ui.button(label='Classement', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['riche']), style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
     async def classement(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=embed_classement(interaction.guild))
 
-    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
+    @discord.ui.button(label='Mes flocons', emoji=discord.PartialEmoji.from_str(MALFRED_EMOTES['flocon']), style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
     async def flocons(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(f'❄️ Tu as **{solde_joueur(interaction.user.id)} flocons**.', ephemeral=True)
 
