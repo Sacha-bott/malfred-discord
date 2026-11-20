@@ -1,38 +1,91 @@
 import os
 import random
 import sqlite3
-from datetime import datetime, timezone
+import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
+logging.basicConfig(level=logging.INFO)
 DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
+GUILD_ID = int(os.getenv('GUILD_ID', '0') or '0')
+STAFF_IDS = {int(x.strip()) for x in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if x.strip().isdigit()}
+TZ = ZoneInfo('Europe/Zurich')
+
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+# Pas de message_content, ni de members intent : commandes / et boutons uniquement.
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 OBJETS = {
-    'bouclier': ('🛡️ Bouclier givré', 25, 'Annule la prochaine perte de flocons.'),
-    'trefle': ('🍀 Trèfle douteux', 15, '+15 points de chance sur le prochain cadeau ouvert.'),
-    'boule': ('🔮 Boule à neige', 30, 'Donne droit à une rencontre supplémentaire.'),
+    'bouclier': ('🛡️ Bouclier givré', 25, 'Annule ta prochaine perte de flocons.'),
+    'trefle': ('🍀 Trèfle douteux', 15, '+15 points de chance au prochain cadeau.'),
+    'boule': ('🔮 Boule à neige', 30, 'Débloque une rencontre supplémentaire.'),
     'paquet': ('🎁 Paquet suspect', 20, 'Rapporte immédiatement 0 à 30 flocons.'),
-    'canard': ('🦆 Canard de contrebande', 15, 'Objet de collection totalement inutile.'),
+    'canard': ('🦆 Canard de contrebande', 15, 'Une pièce de collection absolument inutile.'),
 }
-
 CADEAUX = {
-    1: (70, (2, 5), (1, 3), '🍬 Friandise suspecte', 'Même les bonbons ont des secrets.', discord.Color.green()),
-    2: (50, (5, 12), (4, 8), '🗝️ Coffre du filou', 'La clé est gratuite. Les regrets aussi.', discord.Color.gold()),
-    3: (30, (15, 30), (8, 15), '🩸 Pacte maudit', 'Signe ici. Non, ne lis pas.', discord.Color.red()),
+    1: (70, (2, 5), (1, 3), '🍬 Friandise suspecte'),
+    2: (50, (5, 12), (4, 8), '🧰 Coffre du filou'),
+    3: (30, (15, 30), (8, 15), '💀 Pacte maudit'),
+}
+REPLIQUES = {
+    'accueil': [
+        'Bienvenue dans mon atelier. Les réclamations vont directement à la cheminée.',
+        'Entrez, entrez ! Les flocons ne vont pas se voler tout seuls.',
+        'Joyeux Noël ! Enfin, surtout pour mon compte en banque.',
+        'Le marché noir du pôle Nord ouvre ses portes. Ne touchez à rien.',
+    ],
+    'cadeaux': [
+        'Trois présents, trois façons de regretter tes choix.',
+        'La magie de Noël ? Non. Les probabilités.',
+        'Un cadeau gratuit ? Tu me prends pour un philanthrope ?',
+        'La chance sourit aux audacieux. Moi, je souris aux perdants.',
+    ],
+    'boutique': [
+        'Mes prix sont fixes, ma morale beaucoup moins.',
+        'Chaque objet est garanti presque authentique.',
+        'Je n’accepte ni retours, ni pleurnicheries.',
+        'Tu sens cette odeur ? C’est celle des mauvaises affaires.',
+    ],
+    'deja': [
+        'Un cadeau par jour ! Tu pensais vraiment m’avoir deux fois ?',
+        'Le calendrier dit non. Moi aussi, mais avec davantage de mépris.',
+        'Tu as déjà tenté ta chance aujourd’hui. Va embêter un renne.',
+        'Les cadeaux ne repoussent pas en dix minutes, génie.',
+        'Reviens demain. Mon stock de catastrophes doit se recharger.',
+    ],
+    'gain': [
+        'Scandale ! J’avais pourtant truqué l’emballage.',
+        'Bon. Profite avant que mon comptable ne découvre ça.',
+        'Une victoire ? C’est manifestement une erreur administrative.',
+        'Je déteste quand les probabilités font leur travail.',
+        'Tu as gagné. Je vais aller bouder dans une congère.',
+    ],
+    'perte': [
+        'Quel magnifique don à ma caisse personnelle !',
+        'Le Père Noël t’envoie ses condoléances.',
+        'Tu viens de financer mon prochain traîneau.',
+        'Les petites lignes étaient pourtant écrites en tout petit.',
+        'C’est douloureux ? Pour toi, peut-être. Pour moi, délicieux.',
+    ],
+    'achat': [
+        'Merci pour cette transaction parfaitement douteuse.',
+        'Une vente ! Mon cœur de glace frémit.',
+        'Je te souhaite de ne jamais lire les conditions générales.',
+        'C’est emballé. Je garde évidemment le reçu.',
+    ],
 }
 
-PHRASES_DEJA = [
-    '🎄 Un seul cadeau par jour, petit escroc. Tu pensais vraiment me duper ?',
-    '🧦 Reviens demain ! Mon stock de catastrophes est limité.',
-    '😈 J’admire ton audace, mais le calendrier sait compter.',
-    '🪤 Deux cadeaux en un jour ? C’est moi l’arnaqueur ici !',
-    '🎁 Pas si vite ! Le prochain piège t’attend demain.',
-]
+
+def phrase(categorie):
+    return random.choice(REPLIQUES[categorie])
+
+
+def aujourd_hui():
+    return datetime.now(TZ).date().isoformat()
 
 
 def connexion():
@@ -75,10 +128,6 @@ def retirer_objet(db, user_id, objet):
     db.execute('DELETE FROM inventaire WHERE user_id=? AND objet=?', (user_id, objet))
 
 
-def jour_utc():
-    return datetime.now(timezone.utc).date().isoformat()
-
-
 def solde_joueur(user_id):
     with connexion() as db:
         creer_joueur(db, user_id)
@@ -86,13 +135,13 @@ def solde_joueur(user_id):
 
 
 def ouvrir_cadeau(user_id, choix):
-    chance, gains, pertes, nom, _, _ = CADEAUX[choix]
+    chance, gains, pertes, nom = CADEAUX[choix]
     with connexion() as db:
         db.execute('BEGIN IMMEDIATE')
         creer_joueur(db, user_id)
         solde, dernier = db.execute('SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id=?', (user_id,)).fetchone()
-        if dernier == jour_utc():
-            return random.choice(PHRASES_DEJA)
+        if dernier == aujourd_hui():
+            return '🎄 ' + phrase('deja'), discord.Color.orange()
         bonus = 15 if possede(db, user_id, 'trefle') else 0
         if bonus:
             retirer_objet(db, user_id, 'trefle')
@@ -102,71 +151,19 @@ def ouvrir_cadeau(user_id, choix):
         if protege:
             retirer_objet(db, user_id, 'bouclier')
         nouveau = solde + montant if victoire else (solde if protege else max(0, solde - montant))
-        db.execute('UPDATE joueurs SET flocons=?, dernier_cadeau=? WHERE user_id=?', (nouveau, jour_utc(), user_id))
+        db.execute('UPDATE joueurs SET flocons=?, dernier_cadeau=? WHERE user_id=?', (nouveau, aujourd_hui(), user_id))
     if victoire:
-        phrase = random.choice(['Mon comptable va me tuer !', 'C’est scandaleux, tu as gagné !', 'Un miracle. Je demande un remboursement.', 'Tu as soudoyé les rennes ou quoi ?'])
-        resultat = f'🎉 **+{nouveau - solde} flocons !**'
+        bilan = f'🎉 **+{nouveau - solde} flocons !**\n{phrase("gain")}'
+        couleur = discord.Color.green()
     elif protege:
-        phrase = '🛡️ Ton bouclier s’est brisé en absorbant la perte !'
-        resultat = '❄️ **0 flocon perdu !**'
+        bilan = '🛡️ Ton bouclier givré s’est brisé. **Aucun flocon perdu !**'
+        couleur = discord.Color.blue()
     else:
-        phrase = random.choice(['HAHA ! Les affaires reprennent.', 'C’est Noël pour MOI ! 😈', 'Fallait lire les petites lignes.', 'Je viens de financer mon prochain traîneau.', 'Tu viens de faire un don à mon ego.'])
-        resultat = f'💀 **{nouveau - solde} flocons !**'
-    return (f'**{nom}**\n{resultat}\n{phrase}\n❄️ Nouveau solde : **{nouveau} flocons**.'
-            + (' 🍀 Trèfle utilisé !' if bonus else ''))
-
-
-def embed_cadeau(numero):
-    chance, gains, pertes, nom, phrase, couleur = CADEAUX[numero]
-    embed = discord.Embed(title=nom, description=f'*« {phrase} »*\n\n🎲 **{chance} % de chance de gagner**', color=couleur)
-    embed.add_field(name='✨ Si tu gagnes', value=f'**+{gains[0]} à +{gains[1]} ❄️**', inline=True)
-    embed.add_field(name='💀 Si tu perds', value=f'**−{pertes[0]} à −{pertes[1]} ❄️**', inline=True)
-    embed.set_footer(text='Un seul cadeau par jour, tous types confondus')
-    return embed
-
-
-class BoutonCadeau(discord.ui.View):
-    def __init__(self, numero):
-        super().__init__(timeout=None)
-        self.numero = numero
-        labels = {1: ('Tenter ma chance', '🍬', discord.ButtonStyle.success),
-                  2: ('Ouvrir le coffre', '🗝️', discord.ButtonStyle.primary),
-                  3: ('Signer le pacte', '🩸', discord.ButtonStyle.danger)}
-        label, emoji, style = labels[numero]
-        bouton = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f'malfred:cadeau:separe:{numero}')
-        bouton.callback = self.cliquer
-        self.add_item(bouton)
-
-    async def cliquer(self, interaction):
-        resultat = ouvrir_cadeau(interaction.user.id, self.numero)
-        embed = discord.Embed(title='🎁 Verdict de Malfred', description=resultat, color=discord.Color.gold())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-async def envoyer_cadeaux(destination, ephemeral=False):
-    for numero in CADEAUX:
-        await destination.send(embed=embed_cadeau(numero), view=BoutonCadeau(numero), ephemeral=ephemeral)
-
-
-def afficher_boutique():
-    embed = discord.Embed(title='🛒 LE MARCHÉ NOIR DE MALFRED',
-                          description=random.choice(['Mes prix sont aussi honnêtes que moi. 😈', 'Soldes ? Ce mot est interdit ici.', 'Entre, mais surveille ton portefeuille.']),
-                          color=discord.Color.purple())
-    for _, (nom, prix, description) in OBJETS.items():
-        embed.add_field(name=f'{nom} — {prix} ❄️', value=description, inline=False)
-    embed.set_footer(text='1 achat par jour • 1 exemplaire par objet • Aucun échange')
-    return embed
-
-
-def afficher_inventaire(user):
-    with connexion() as db:
-        creer_joueur(db, user.id)
-        objets = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet', (user.id,)).fetchall()
-        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user.id,)).fetchone()[0]
-    contenu = '\n'.join(OBJETS[code][0] for (code,) in objets if code in OBJETS)
-    return discord.Embed(title=f'🎒 Inventaire de {user.display_name}',
-                         description=(contenu or 'Vide ! Même les mites ont déménagé. 😈') + f'\n\n❄️ **{solde} flocons**',
-                         color=discord.Color.gold())
+        bilan = f'💀 **-{solde - nouveau} flocons !**\n{phrase("perte")}'
+        couleur = discord.Color.red()
+    if bonus:
+        bilan += '\n🍀 Ton trèfle a été utilisé.'
+    return f'**{nom}**\n\n{bilan}\n\n❄️ Nouveau solde : **{nouveau} flocons**.', couleur
 
 
 def effectuer_achat(user_id, objet):
@@ -176,115 +173,22 @@ def effectuer_achat(user_id, objet):
         creer_joueur(db, user_id)
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
         ancien = db.execute('SELECT dernier_achat FROM boutique_joueurs WHERE user_id=?', (user_id,)).fetchone()
-        if ancien and ancien[0] == jour_utc():
-            return random.choice(['🛒 Un achat par jour. Mes règles, mon empire.', '😈 Tu as déjà dépensé aujourd’hui. Reviens demain !'])
+        if ancien and ancien[0] == aujourd_hui():
+            return '🛒 Un achat par jour. Ma boutique n’est pas un buffet à volonté.'
         if possede(db, user_id, objet):
-            return '🎒 Tu possèdes déjà cet objet ! Un exemplaire maximum.'
+            return '🎒 Tu possèdes déjà cet objet. Un exemplaire maximum !'
         if solde < prix:
-            return f'💸 **{prix} flocons** nécessaires, tu n’en as que **{solde}** !'
+            return f'💸 Il faut **{prix} flocons** et tu n’en as que **{solde}**.'
         db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?', (prix, user_id))
-        db.execute('INSERT INTO boutique_joueurs (user_id, dernier_achat) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat', (user_id, jour_utc()))
+        db.execute('''INSERT INTO boutique_joueurs (user_id, dernier_achat) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat''', (user_id, aujourd_hui()))
         if objet != 'paquet':
             db.execute('INSERT INTO inventaire (user_id, objet, quantite) VALUES (?, ?, 1)', (user_id, objet))
         gain = random.randint(0, 30) if objet == 'paquet' else 0
         if gain:
             db.execute('UPDATE joueurs SET flocons=flocons+? WHERE user_id=?', (gain, user_id))
-        reponse = f'🛒 Tu achètes **{nom}** pour **{prix} flocons** !\n'
-        if objet == 'paquet':
-            reponse += f'🎁 Le paquet contenait **{gain} flocons** !\n'
-        return reponse + f'❄️ Solde : **{solde - prix + gain} flocons**. 😈'
-
-
-class ChoixObjet(discord.ui.Select):
-    def __init__(self):
-        options = [discord.SelectOption(label=nom.split(' ', 1)[1], value=code,
-                   description=f'{prix} flocons — {description[:65]}', emoji=nom.split(' ', 1)[0])
-                   for code, (nom, prix, description) in OBJETS.items()]
-        super().__init__(placeholder='Choisis un objet à acheter…', options=options, custom_id='malfred:choix_objet')
-
-    async def callback(self, interaction):
-        objet = self.values[0]
-        nom, prix, description = OBJETS[objet]
-        await interaction.response.send_message(f'🛒 **{nom}** — **{prix} ❄️**\n{description}\nTu confirmes cet achat ?',
-                                                view=ConfirmerAchat(objet), ephemeral=True)
-
-
-class ConfirmerAchat(discord.ui.View):
-    def __init__(self, objet):
-        super().__init__(timeout=120)
-        self.objet = objet
-
-    @discord.ui.button(label='Confirmer mon achat', style=discord.ButtonStyle.success, emoji='💰')
-    async def confirmer(self, interaction, button):
-        resultat = effectuer_achat(interaction.user.id, self.objet)
-        await interaction.response.edit_message(content=resultat, view=None)
-
-    @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
-    async def annuler(self, interaction, button):
-        await interaction.response.edit_message(content='Achat annulé. Malfred boude. 😤', view=None)
-
-
-class BoutiqueView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(ChoixObjet())
-
-    @discord.ui.button(label='Mon inventaire', emoji='🎒', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire')
-    async def inventaire_bouton(self, interaction, button):
-        await interaction.response.send_message(embed=afficher_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
-
-    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:flocons')
-    async def flocons_bouton(self, interaction, button):
-        await interaction.response.send_message(f'❄️ Tu possèdes **{solde_joueur(interaction.user.id)} flocons** !', ephemeral=True)
-
-    @discord.ui.button(label='Cadeaux du jour', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:cadeaux')
-    async def cadeaux_bouton(self, interaction, button):
-        await interaction.response.defer(ephemeral=True)
-        await envoyer_cadeaux(interaction.followup, ephemeral=True)
-
-
-def afficher_accueil():
-    return discord.Embed(title='🎄 MALFRED — LE LUTIN DU CHAOS',
-                         description=random.choice(['Bienvenue dans mon marché noir de Noël. 😈', 'Je vends du rêve, pas des garanties.', 'Entrez donc, mes futurs clients ruinés !'])
-                         + '\n\n🎁 **Cadeaux** · Trois risques, un choix quotidien\n🛒 **Boutique** · Dépense tes flocons\n🎒 **Inventaire** · Regarde tes objets\n🏆 **Classement** · Espionne les riches',
-                         color=discord.Color.green())
-
-
-def afficher_classement(guild):
-    with connexion() as db:
-        scores = db.execute('SELECT user_id, flocons FROM joueurs ORDER BY flocons DESC, user_id ASC').fetchall()
-    if guild:
-        scores = [(uid, score) for uid, score in scores if guild.get_member(uid) is not None]
-    top = scores[:10]
-    description = '\n'.join(f'**{i}.** <@{uid}> — **{score}** ❄️' for i, (uid, score) in enumerate(top, 1))
-    return discord.Embed(title='🏆 LES PLUS RICHES DU PÔLE NORD',
-                         description=description or 'Personne à plumer pour le moment.', color=discord.Color.gold())
-
-
-class AccueilView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label='Cadeaux', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:menu:cadeaux')
-    async def cadeaux(self, interaction, button):
-        await interaction.response.defer(ephemeral=True)
-        await envoyer_cadeaux(interaction.followup, ephemeral=True)
-
-    @discord.ui.button(label='Boutique', emoji='🛒', style=discord.ButtonStyle.primary, custom_id='malfred:menu:boutique')
-    async def boutique(self, interaction, button):
-        await interaction.response.send_message(embed=afficher_boutique(), view=BoutiqueView(), ephemeral=True)
-
-    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:inventaire')
-    async def inventaire(self, interaction, button):
-        await interaction.response.send_message(embed=afficher_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
-
-    @discord.ui.button(label='Classement', emoji='🏆', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
-    async def classement(self, interaction, button):
-        await interaction.response.send_message(embed=afficher_classement(interaction.guild), ephemeral=True)
-
-    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
-    async def flocons(self, interaction, button):
-        await interaction.response.send_message(f'❄️ Tu possèdes **{solde_joueur(interaction.user.id)} flocons** !', ephemeral=True)
+    supplement = f'\n🎁 Le paquet contenait **{gain} flocons** !' if objet == 'paquet' else ''
+    return f'🛒 Achat : **{nom}** pour **{prix} flocons** !{supplement}\n{phrase("achat")}\n❄️ Solde : **{solde - prix + gain}**.'
 
 
 def utiliser_boule(user_id):
@@ -292,7 +196,7 @@ def utiliser_boule(user_id):
         db.execute('BEGIN IMMEDIATE')
         creer_joueur(db, user_id)
         if not possede(db, user_id, 'boule'):
-            return '🔮 Tu ne possèdes pas de boule à neige !'
+            return '🔮 Tu n’as pas de boule à neige. Même ma magie a des limites.'
         retirer_objet(db, user_id, 'boule')
         montant = random.randint(-5, 10)
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
@@ -301,9 +205,126 @@ def utiliser_boule(user_id):
             retirer_objet(db, user_id, 'bouclier')
         nouveau = solde if protege else max(0, solde + montant)
         db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?', (nouveau, user_id))
-    return (f'🔮 Malfred secoue sa boule à neige... **{nouveau - solde:+d} flocons** !\n'
-            + ('🛡️ Ton bouclier t’a protégé !\n' if protege else '')
-            + f'❄️ Nouveau solde : **{nouveau}**. 😈')
+    return (f'🔮 La boule tourbillonne… **{nouveau - solde:+d} flocons** !\n'
+            + ('🛡️ Ton bouclier a absorbé la perte.\n' if protege else '')
+            + f'❄️ Nouveau solde : **{nouveau}**.')
+
+
+def embed_accueil():
+    e = discord.Embed(title='🎄 MALFRED — LE LUTIN DU CHAOS',
+        description=f'{phrase("accueil")} 😈\n\nChoisis une activité ci-dessous :', color=discord.Color.dark_green())
+    e.add_field(name='🎁 Cadeaux', value='Un pari chaque jour', inline=True)
+    e.add_field(name='🛒 Boutique', value='Dépense tes flocons', inline=True)
+    e.add_field(name='🎒 Inventaire', value='Tes trouvailles douteuses', inline=True)
+    e.add_field(name='🏆 Classement', value='Les plus riches', inline=True)
+    e.set_footer(text='Malfred décline toute responsabilité pour tes décisions.')
+    return e
+
+
+def embed_cadeaux():
+    e = discord.Embed(title='🎁 LES CADEAUX PIÉGÉS',
+        description=f'{phrase("cadeaux")} 😈\n**Un cadeau par jour.**', color=discord.Color.red())
+    e.add_field(name='🍬 Friandise suspecte · 70 %', value='🟢 Gain : **2 à 5** ❄️\n🔻 Perte : **1 à 3** ❄️', inline=False)
+    e.add_field(name='🧰 Coffre du filou · 50 %', value='🟡 Gain : **5 à 12** ❄️\n🔻 Perte : **4 à 8** ❄️', inline=False)
+    e.add_field(name='💀 Pacte maudit · 30 %', value='🔴 Gain : **15 à 30** ❄️\n🔻 Perte : **8 à 15** ❄️', inline=False)
+    e.set_footer(text='Choisis directement avec les boutons sous cet encadré.')
+    return e
+
+
+def embed_boutique():
+    e = discord.Embed(title='🛒 LE MARCHÉ NOIR DE MALFRED',
+        description=phrase('boutique') + ' 😈', color=discord.Color.green())
+    for _, (nom, prix, description) in OBJETS.items():
+        e.add_field(name=f'{nom} — {prix} ❄️', value=description, inline=False)
+    e.set_footer(text='1 achat par jour • 1 exemplaire de chaque objet • Pas d’échanges')
+    return e
+
+
+def embed_inventaire(user):
+    with connexion() as db:
+        creer_joueur(db, user.id)
+        objets = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet', (user.id,)).fetchall()
+        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user.id,)).fetchone()[0]
+    contenu = '\n'.join(OBJETS[code][0] for (code,) in objets if code in OBJETS)
+    return discord.Embed(title=f'🎒 Inventaire de {user.display_name}',
+        description=(contenu or 'C’est vide. Même les mites ont déménagé.') + f'\n\n❄️ **{solde} flocons**',
+        color=discord.Color.gold())
+
+
+def embed_classement(guild):
+    with connexion() as db:
+        scores = db.execute('SELECT user_id, flocons FROM joueurs ORDER BY flocons DESC, user_id ASC').fetchall()
+    # Classement de tous les joueurs enregistrés dans cette base.
+    top = scores[:10]
+    description = '\n'.join(f'**{i}.** <@{uid}> — **{score} ❄️**' for i, (uid, score) in enumerate(top, 1))
+    return discord.Embed(title='🏆 LES FORTUNES DU PÔLE NORD',
+        description=description or 'Personne à plumer pour le moment.', color=discord.Color.gold())
+
+
+class CadeauxView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def jouer(self, interaction, numero):
+        texte, couleur = ouvrir_cadeau(interaction.user.id, numero)
+        await interaction.response.send_message(embed=discord.Embed(
+            title='🎁 Le verdict de Malfred', description=texte, color=couleur), ephemeral=True)
+
+    @discord.ui.button(label='Friandise suspecte', emoji='🍬', style=discord.ButtonStyle.success, custom_id='malfred:ouvrir:1')
+    async def choix1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.jouer(interaction, 1)
+
+    @discord.ui.button(label='Coffre du filou', emoji='🧰', style=discord.ButtonStyle.primary, custom_id='malfred:ouvrir:2')
+    async def choix2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.jouer(interaction, 2)
+
+    @discord.ui.button(label='Pacte maudit', emoji='💀', style=discord.ButtonStyle.danger, custom_id='malfred:ouvrir:3')
+    async def choix3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.jouer(interaction, 3)
+
+
+class ConfirmerAchat(discord.ui.View):
+    def __init__(self, objet):
+        super().__init__(timeout=120)
+        self.objet = objet
+
+    @discord.ui.button(label='Confirmer', emoji='💰', style=discord.ButtonStyle.success)
+    async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        resultat = effectuer_achat(interaction.user.id, self.objet)
+        await interaction.response.edit_message(content=resultat, embed=None, view=None)
+
+    @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
+    async def annuler(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content='Achat annulé. Je vais m’en remettre. Peut-être.', embed=None, view=None)
+
+
+class ChoixObjet(discord.ui.Select):
+    def __init__(self):
+        options = [discord.SelectOption(label=nom.split(' ', 1)[1], value=code,
+            description=f'{prix} flocons — {description[:65]}', emoji=nom.split(' ', 1)[0])
+            for code, (nom, prix, description) in OBJETS.items()]
+        super().__init__(placeholder='🛒 Choisis un objet…', options=options, custom_id='malfred:choix_objet')
+
+    async def callback(self, interaction: discord.Interaction):
+        objet = self.values[0]
+        nom, prix, description = OBJETS[objet]
+        e = discord.Embed(title=f'🛒 {nom}', description=f'{description}\n\n**Prix : {prix} ❄️**\nTu confirmes ?',
+                          color=discord.Color.gold())
+        await interaction.response.send_message(embed=e, view=ConfirmerAchat(objet), ephemeral=True)
+
+
+class BoutiqueView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ChoixObjet())
+
+    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:inventaire', row=1)
+    async def inventaire(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=embed_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
+
+    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:boutique:flocons', row=1)
+    async def flocons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f'❄️ Tu as **{solde_joueur(interaction.user.id)} flocons**.', ephemeral=True)
 
 
 class InventaireView(discord.ui.View):
@@ -311,75 +332,127 @@ class InventaireView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label='Utiliser la boule à neige', emoji='🔮', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire:boule')
-    async def boule(self, interaction, button):
+    async def boule(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(utiliser_boule(interaction.user.id), ephemeral=True)
 
 
-@bot.command()
-async def malfred(ctx):
-    await ctx.send(embed=afficher_accueil(), view=AccueilView())
+class AccueilView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='Cadeaux', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:menu:cadeaux')
+    async def cadeaux(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=embed_cadeaux(), view=CadeauxView(), ephemeral=True)
+
+    @discord.ui.button(label='Boutique', emoji='🛒', style=discord.ButtonStyle.primary, custom_id='malfred:menu:boutique')
+    async def boutique(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=embed_boutique(), view=BoutiqueView(), ephemeral=True)
+
+    @discord.ui.button(label='Inventaire', emoji='🎒', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:inventaire')
+    async def inventaire(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=embed_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
+
+    @discord.ui.button(label='Classement', emoji='🏆', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
+    async def classement(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=embed_classement(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
+    async def flocons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(f'❄️ Tu as **{solde_joueur(interaction.user.id)} flocons**.', ephemeral=True)
 
 
-@bot.command(aliases=['flocon'])
-async def flocons(ctx):
-    await ctx.send(f'❄️ {ctx.author.mention}, tu possèdes **{solde_joueur(ctx.author.id)} flocons** !')
+@bot.tree.command(name='malfred', description='Ouvre le menu interactif de Malfred 🎄')
+async def cmd_malfred(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed_accueil(), view=AccueilView())
 
 
-@bot.command()
-async def cadeau(ctx):
-    await envoyer_cadeaux(ctx)
+@bot.tree.command(name='cadeau', description='Choisis ton cadeau piégé du jour 🎁')
+async def cmd_cadeau(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed_cadeaux(), view=CadeauxView(), ephemeral=True)
 
 
-@bot.command()
-async def ouvrir(ctx, choix: int = 0):
-    if choix not in CADEAUX:
-        await envoyer_cadeaux(ctx)
-    else:
-        await ctx.send(ouvrir_cadeau(ctx.author.id, choix))
+@bot.tree.command(name='boutique', description='Visite la boutique douteuse de Malfred 🛒')
+async def cmd_boutique(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed_boutique(), view=BoutiqueView(), ephemeral=True)
 
 
-@bot.command()
-async def boutique(ctx):
-    await ctx.send(embed=afficher_boutique(), view=BoutiqueView())
+@bot.tree.command(name='inventaire', description='Consulte tes objets 🎒')
+async def cmd_inventaire(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed_inventaire(interaction.user), view=InventaireView(), ephemeral=True)
 
 
-@bot.command()
-async def inventaire(ctx):
-    await ctx.send(embed=afficher_inventaire(ctx.author), view=InventaireView())
+@bot.tree.command(name='flocons', description='Consulte ton solde de flocons ❄️')
+async def cmd_flocons(interaction: discord.Interaction):
+    await interaction.response.send_message(f'❄️ Tu as **{solde_joueur(interaction.user.id)} flocons**.', ephemeral=True)
 
 
-@bot.command()
-async def acheter(ctx, objet: str = ''):
-    objet = objet.lower().strip()
-    if objet not in OBJETS:
-        await ctx.send('🛒 Tape **!boutique** puis sélectionne un objet dans le menu interactif.')
+@bot.tree.command(name='classement', description='Découvre les plus riches du pôle Nord 🏆')
+async def cmd_classement(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed_classement(interaction.guild), ephemeral=True)
+
+
+@bot.tree.command(name='rencontre', description='Utilise ta boule à neige pour une rencontre 🔮')
+async def cmd_rencontre(interaction: discord.Interaction):
+    await interaction.response.send_message(utiliser_boule(interaction.user.id), ephemeral=True)
+
+
+def est_staff(interaction):
+    if interaction.user.id in STAFF_IDS:
+        return True
+    # Les personnes ayant la permission « Gérer le serveur » peuvent administrer Malfred.
+    return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild
+
+
+@bot.tree.command(name='admin_reset_cadeau', description='Staff : réinitialise le cadeau quotidien d’un joueur')
+@app_commands.describe(joueur='Joueur dont le cadeau doit être réinitialisé')
+@app_commands.guild_only()
+async def cmd_admin_reset(interaction: discord.Interaction, joueur: discord.User):
+    if not est_staff(interaction):
+        await interaction.response.send_message('🔒 Cette commande est réservée au staff autorisé.', ephemeral=True)
         return
-    await ctx.send(effectuer_achat(ctx.author.id, objet))
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        creer_joueur(db, joueur.id)
+        db.execute('UPDATE joueurs SET dernier_cadeau=NULL WHERE user_id=?', (joueur.id,))
+    await interaction.response.send_message(
+        f'✅ Cadeau quotidien réinitialisé pour {joueur.mention}. **Ses flocons sont inchangés.**', ephemeral=True)
 
 
-@bot.command()
-async def rencontre(ctx):
-    await ctx.send(utiliser_boule(ctx.author.id))
+# Les commandes ont été déclarées sur bot : on utilise setup_hook sur cette même instance.
+async def setup_hook():
+    bot.add_view(AccueilView())
+    bot.add_view(CadeauxView())
+    bot.add_view(BoutiqueView())
+    bot.add_view(InventaireView())
+    if GUILD_ID:
+        serveur = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=serveur)
+        commandes = await bot.tree.sync(guild=serveur)
+        logging.info('Synchronisation de %s commandes sur le serveur %s', len(commandes), GUILD_ID)
+    else:
+        commandes = await bot.tree.sync()
+        logging.info('Synchronisation globale de %s commandes (apparition parfois différée)', len(commandes))
 
 
-@bot.command()
-async def classement(ctx):
-    await ctx.send(embed=afficher_classement(ctx.guild))
+bot.setup_hook = setup_hook
 
 
 @bot.event
 async def on_ready():
-    print(f'🎄 Malfred est réveillé : {bot.user}')
+    logging.info('🎄 Malfred est connecté : %s (ID %s)', bot.user, bot.user.id)
 
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
-        await ctx.send('🎄 Argument invalide ! Vérifie **!cadeau** ou **!boutique**.')
-        return
-    raise error
+@bot.tree.error
+async def on_slash_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    logging.error('Erreur commande / : %r', error)
+    message = '⚠️ Malfred a trébuché dans une congère. Réessaie dans un instant.'
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 if __name__ == '__main__':
@@ -387,9 +460,4 @@ if __name__ == '__main__':
     token = os.getenv('DISCORD_TOKEN')
     if not token:
         raise RuntimeError('La variable DISCORD_TOKEN manque sur Railway.')
-    bot.add_view(BoutiqueView())
-    bot.add_view(AccueilView())
-    bot.add_view(InventaireView())
-    for numero in CADEAUX:
-        bot.add_view(BoutonCadeau(numero))
     bot.run(token)
