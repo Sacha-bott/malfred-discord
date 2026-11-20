@@ -1,6 +1,9 @@
-
 import os
 import sqlite3
+import random
+from datetime import datetime, timezone
+from pathlib import Path
+
 import discord
 from discord.ext import commands
 
@@ -9,31 +12,37 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-DB_PATH = os.getenv("DB_PATH", "malfred.db")
+DB_PATH = Path("/data/malfred.db")
 
-def init_db():
-    with sqlite3.connect(DB_PATH) as db:
+
+def connexion():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(DB_PATH)
+
+
+def initialiser():
+    with connexion() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS joueurs (
                 user_id INTEGER PRIMARY KEY,
-                flocons INTEGER NOT NULL DEFAULT 20
+                flocons INTEGER NOT NULL DEFAULT 20,
+                dernier_cadeau TEXT
             )
         """)
 
-def obtenir_solde(user_id):
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute(
-            "INSERT OR IGNORE INTO joueurs (user_id) VALUES (?)",
-            (user_id,)
-        )
-        return db.execute(
-            "SELECT flocons FROM joueurs WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()[0]
+
+def creer_joueur(db, user_id):
+    db.execute(
+        "INSERT OR IGNORE INTO joueurs (user_id) VALUES (?)",
+        (user_id,)
+    )
+
 
 @bot.event
 async def on_ready():
+    initialiser()
     print(f"🎄 Malfred est réveillé : {bot.user}")
+
 
 @bot.command()
 async def malfred(ctx):
@@ -42,14 +51,60 @@ async def malfred(ctx):
         "Surveillez vos flocons, bande de pigeons ! 😈"
     )
 
+
 @bot.command()
-async def solde(ctx):
-    flocons = obtenir_solde(ctx.author.id)
+async def flocons(ctx):
+    with connexion() as db:
+        creer_joueur(db, ctx.author.id)
+        solde = db.execute(
+            "SELECT flocons FROM joueurs WHERE user_id = ?",
+            (ctx.author.id,)
+        ).fetchone()[0]
+
     await ctx.send(
         f"❄️ {ctx.author.mention}, tu possèdes "
-        f"**{flocons} flocons** !\n"
-        "😈 Profites-en, ça ne durera pas !"
+        f"**{solde} flocons** !"
     )
 
-init_db()
+
+@bot.command()
+async def cadeau(ctx):
+    aujourd_hui = datetime.now(timezone.utc).date().isoformat()
+
+    with connexion() as db:
+        db.execute("BEGIN IMMEDIATE")
+        creer_joueur(db, ctx.author.id)
+
+        solde, dernier = db.execute(
+            "SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id = ?",
+            (ctx.author.id,)
+        ).fetchone()
+
+        if dernier == aujourd_hui:
+            message = (
+                "🎁 Doucement, petit pigeon ! "
+                "Tu as déjà ouvert ton cadeau aujourd'hui !"
+            )
+        else:
+            gain = random.randint(2, 8)
+            nouveau_solde = solde + gain
+
+            db.execute(
+                """UPDATE joueurs
+                   SET flocons = ?, dernier_cadeau = ?
+                   WHERE user_id = ?""",
+                (nouveau_solde, aujourd_hui, ctx.author.id)
+            )
+
+            message = (
+                f"🎁 {ctx.author.mention}, Malfred t'accorde "
+                f"**{gain} flocons** ! ❄️\n"
+                f"Tu possèdes maintenant **{nouveau_solde} flocons**. "
+                "Profites-en, ça ne durera pas ! 😈"
+            )
+
+    await ctx.send(message)
+
+
+initialiser()
 bot.run(os.environ["DISCORD_TOKEN"])
