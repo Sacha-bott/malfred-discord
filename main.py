@@ -975,57 +975,64 @@ async def gerer_podium():
     while not bot.is_closed():
         try:
             if jeu_termine():
+                # Le podium est figé une seule fois, même si Railway redémarre.
                 with db_open() as db:
                     db.execute('BEGIN IMMEDIATE')
+                    snapshot = db.execute("SELECT valeur FROM etat_marche WHERE cle='podium_scores_finaux'").fetchone()
+                    if snapshot:
+                        scores = [tuple(ligne) for ligne in json.loads(snapshot[0])]
+                    else:
+                        scores = db.execute('SELECT user_id,flocons FROM joueurs ORDER BY flocons DESC,user_id ASC LIMIT 3').fetchall()
+                        db.execute("INSERT INTO etat_marche(cle,valeur) VALUES ('podium_scores_finaux',?)", (json.dumps(scores),))
                     annonce = db.execute("SELECT valeur FROM etat_marche WHERE cle='podium_annonce_message'").fetchone()
-                    scores = classement_final()
                 if not annonce:
                     salon = bot.get_channel(CALENDAR_CHANNEL_ID)
                     if salon is None:
-                        try: salon = await bot.fetch_channel(CALENDAR_CHANNEL_ID)
-                        except (discord.HTTPException, discord.Forbidden): salon = None
+                        try:
+                            salon = await bot.fetch_channel(CALENDAR_CHANNEL_ID)
+                        except (discord.HTTPException, discord.Forbidden):
+                            salon = None
                     if salon:
                         message = await salon.send(embed=annonce_finale_embed(scores))
-                        # On conserve l'ID du message pour éviter une nouvelle publication après redémarrage.
                         with db_open() as db:
                             db.execute("INSERT OR IGNORE INTO etat_marche(cle,valeur) VALUES ('podium_annonce_message',?)", (str(message.id),))
-                # Les rôles peuvent être configurés même après la publication du podium.
-                if annonce or 'message' in locals():
+                        annonce = (str(message.id),)
+                if annonce:
                     with db_open() as db:
-                        for rang,(uid,_) in enumerate(scores,1):
-                            role_id=PODIUM_ROLE_IDS[rang]
+                        for rang, (uid, _) in enumerate(scores, 1):
+                            role_id = PODIUM_ROLE_IDS[rang]
                             if role_id:
-                                fin={1:datetime(2027,12,24,21,tzinfo=TZ),
-                                     2:datetime(2027,3,24,21,tzinfo=TZ),
-                                     3:datetime(2027,1,24,21,tzinfo=TZ)}[rang]
-                                db.execute('INSERT OR IGNORE INTO podium_roles(user_id,role_id,expiration) VALUES (?,?,?)',(uid,role_id,fin.isoformat()))
-                # Attribuer et retirer les rôles, en réessayant si Discord n'est pas disponible.
-                if GUILD_ID:
-                    guild=bot.get_guild(GUILD_ID)
-                else:
-                    guild=next((g for g in bot.guilds if g.get_channel(CALENDAR_CHANNEL_ID)),None)
+                                fin = {1: datetime(2027,12,24,21,tzinfo=TZ),
+                                       2: datetime(2027,3,24,21,tzinfo=TZ),
+                                       3: datetime(2027,1,24,21,tzinfo=TZ)}[rang]
+                                db.execute('INSERT OR IGNORE INTO podium_roles(user_id,role_id,expiration) VALUES (?,?,?)', (uid,role_id,fin.isoformat()))
+                guild = bot.get_guild(GUILD_ID) if GUILD_ID else next((g for g in bot.guilds if g.get_channel(CALENDAR_CHANNEL_ID)), None)
                 if guild:
                     with db_open() as db:
-                        rows=db.execute('SELECT user_id,role_id,expiration,attribue,retire FROM podium_roles WHERE retire=0').fetchall()
+                        rows = db.execute('SELECT user_id,role_id,expiration,attribue,retire FROM podium_roles WHERE retire=0').fetchall()
                     for uid,role_id,expiration,attribue,retire in rows:
-                        role=guild.get_role(role_id)
+                        role = guild.get_role(role_id)
                         if not role:
-                            logging.warning('Rôle podium %s introuvable sur le serveur',role_id)
+                            logging.warning('Rôle podium %s introuvable sur le serveur', role_id)
                             continue
                         try:
-                            membre=guild.get_member(uid) or await guild.fetch_member(uid)
-                            expire=now()>=datetime.fromisoformat(expiration)
+                            membre = guild.get_member(uid) or await guild.fetch_member(uid)
+                            expire = now() >= datetime.fromisoformat(expiration)
                             if expire:
-                                if role in membre.roles: await membre.remove_roles(role,reason='Fin de durée du rôle Malfred')
-                                with db_open() as db: db.execute('UPDATE podium_roles SET retire=1 WHERE user_id=? AND role_id=?',(uid,role_id))
+                                if role in membre.roles:
+                                    await membre.remove_roles(role, reason='Fin de durée du rôle Malfred')
+                                with db_open() as db:
+                                    db.execute('UPDATE podium_roles SET retire=1 WHERE user_id=? AND role_id=?', (uid,role_id))
                             elif not attribue or role not in membre.roles:
-                                if role not in membre.roles: await membre.add_roles(role,reason='Podium du concours Malfred')
-                                with db_open() as db: db.execute('UPDATE podium_roles SET attribue=1 WHERE user_id=? AND role_id=?',(uid,role_id))
-                        except (discord.Forbidden,discord.HTTPException,discord.NotFound):
-                            logging.exception('Impossible de gérer le rôle %s pour %s',role_id,uid)
+                                if role not in membre.roles:
+                                    await membre.add_roles(role, reason='Podium du concours Malfred')
+                                with db_open() as db:
+                                    db.execute('UPDATE podium_roles SET attribue=1 WHERE user_id=? AND role_id=?', (uid,role_id))
+                        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                            logging.exception('Impossible de gérer le rôle %s pour %s', role_id, uid)
         except Exception:
             logging.exception('Gestion de la finale Malfred')
-        await asyncio.sleep(30 if now().date()==FIN_CONCOURS.date() else 3600)
+        await asyncio.sleep(30 if now().date() == FIN_CONCOURS.date() else 3600)
 
 async def entretien_marche():
     await bot.wait_until_ready()
@@ -1082,12 +1089,24 @@ async def setup_hook():
     bot.add_view(EntreeMarche());bot.add_view(CadeauxView());bot.add_view(BoutiqueView());bot.add_view(InventaireView())
     asyncio.create_task(entretien_marche())
     asyncio.create_task(gerer_podium())
-    if GUILD_ID:
-        guild=discord.Object(id=GUILD_ID)
+    # Synchronisation globale + synchronisation immédiate sur le serveur cible.
+    # Les commandes globales seules peuvent prendre du temps à apparaître sur Discord.
+    globales = await bot.tree.sync()
+    logging.info('%s commandes globales synchronisées', len(globales))
+    serveur_id = GUILD_ID
+    if not serveur_id:
+        try:
+            canal = await bot.fetch_channel(CALENDAR_CHANNEL_ID)
+            serveur_id = canal.guild.id
+        except (discord.HTTPException, discord.Forbidden, AttributeError) as exc:
+            logging.warning('Serveur non détecté pour la synchronisation immédiate : %s', exc)
+    if serveur_id:
+        guild = discord.Object(id=serveur_id)
         bot.tree.copy_global_to(guild=guild)
-        result=await bot.tree.sync(guild=guild)
-    else: result=await bot.tree.sync()
-    logging.info('%s commandes synchronisées',len(result))
+        result = await bot.tree.sync(guild=guild)
+        logging.info('%s commandes synchronisées sur le serveur %s (dont /admin_test_finale)', len(result), serveur_id)
+    else:
+        logging.warning('Ajoute GUILD_ID dans Railway pour synchroniser immédiatement les commandes sur ton serveur.')
 bot.setup_hook=setup_hook
 @bot.event
 async def on_ready(): logging.info('🎄 Malfred connecté : %s',bot.user)
