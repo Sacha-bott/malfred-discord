@@ -5,14 +5,14 @@ import logging
 import asyncio
 import io
 import json
-from malfred_illustrations import image
-from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image, ImageDraw
+from malfred_illustrations import image
 
 logging.basicConfig(level=logging.INFO)
 TZ = ZoneInfo('Europe/Zurich')
@@ -23,29 +23,17 @@ DOC_USER_ID = 124122224016752640
 FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_mere_noel.png')
 FESSES_TROLL_PATH = os.getenv('MALFRED_FESSES_TROLL_IMAGE', 'assets/fesses_final.png')
 STAFF_IDS = {int(s.strip()) for s in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if s.strip().isdigit()}
-
-# IDs recopiés des emotes Discord fournies par Saphi.
 EMOJI_IDS = {
-    'amoureux': 1573298335266115614,
-    'flocon': 1573298111219109948,  # corrigé !
-    'fume': 1573298043090899164,
-    'machiavelique': 1573297932361408594,
-    'moquerie': 1573298266936709150,
-    'mort': 1573298187677208596,
-    'riche': 1573297742925799504,
-    'triste': 1573297857728090203,
+    'amoureux': 1573298335266115614, 'flocon': 1573298111219109948,
+    'fume': 1573298043090899164, 'machiavelique': 1573297932361408594,
+    'moquerie': 1573298266936709150, 'mort': 1573298187677208596,
+    'riche': 1573297742925799504, 'triste': 1573297857728090203,
 }
 E = {k: f'<:malfred_{k}:{v}>' for k, v in EMOJI_IDS.items()}
-
-def button_emoji(key):
-    # Si le bot ne peut pas utiliser une emote externe, le bouton reste fonctionnel.
-    return discord.PartialEmoji(name=f'malfred_{key}', id=EMOJI_IDS[key])
-
-
+def button_emoji(key): return discord.PartialEmoji(name=f'malfred_{key}', id=EMOJI_IDS[key])
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
-
 OBJETS = {
     'bouclier': ('🛡️ Bouclier givré', 25, 'Protège contre la prochaine perte du cadeau quotidien.'),
     'trefle': ('🍀 Trèfle douteux', 15, '+15 points de chance sur le prochain cadeau.'),
@@ -77,7 +65,6 @@ REPLIQUES = {
     'perte': ['Quel magnifique don à ma caisse personnelle !', 'Les petites lignes étaient pourtant écrites en tout petit.'],
     'achat': ['Merci pour cette transaction parfaitement douteuse.', 'Je garde évidemment le reçu.'],
 }
-
 def phrase(k): return random.choice(REPLIQUES[k])
 def now(): return datetime.now(TZ)
 def jour(): return now().date().isoformat()
@@ -113,7 +100,6 @@ def solde(uid):
 def quantite(db, uid, code):
     row = db.execute('SELECT quantite FROM inventaire WHERE user_id=? AND objet=?', (uid, code)).fetchone()
     return row[0] if row else 0
-
 def ajouter(db, uid, code):
     db.execute('INSERT INTO inventaire(user_id,objet,quantite) VALUES (?,?,1) ON CONFLICT(user_id,objet) DO UPDATE SET quantite=quantite+1', (uid, code))
 def consommer(db, uid, code):
@@ -121,7 +107,6 @@ def consommer(db, uid, code):
     db.execute('UPDATE inventaire SET quantite=quantite-1 WHERE user_id=? AND objet=?', (uid, code))
     db.execute('DELETE FROM inventaire WHERE user_id=? AND objet=? AND quantite<=0', (uid, code))
     return True
-
 def activer_row(db, uid): db.execute('INSERT OR IGNORE INTO activations(user_id) VALUES (?)', (uid,))
 def marche_actuel(db):
     t = now().isoformat()
@@ -181,7 +166,7 @@ def achat_normal(uid, code):
         if avant<prix: return f'💸 Il faut {prix} flocons, tu en as {avant}.',False
         db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?',(prix,uid))
         db.execute('INSERT INTO boutique_joueurs(user_id,dernier_achat) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat',(uid,jour()))
-        ajouter(db,uid,code) # même le paquet est stocké jusqu'à activation manuelle
+        ajouter(db,uid,code)
     return f'🛒 **{nom}** acheté pour **{prix} ❄️** !\n{phrase("achat")}\n❄️ Solde : **{avant-prix}**.',True
 
 def achat_noir(uid,code,sacrifice=None):
@@ -205,7 +190,6 @@ def achat_noir(uid,code,sacrifice=None):
             consommer(db,uid,sacrifice)
         elif code=='noir_de':
             if now().month==12 and now().day>=24: return 'Trop tard pour sacrifier le cadeau de demain.',False
-            # Le blocage se produit à l'activation, pas à l'achat.
         else:
             prix={'noir_trefle':8,'noir_chaussette':5,'noir_contrat':10,'noir_canard':20,'noir_sablier':12}.get(code,0)
             if avant<prix: return f'Il te manque {prix-avant} flocons.',False
@@ -250,6 +234,25 @@ def activer(uid,code):
     nom=OBJETS[code][0] if code in OBJETS else NOIR[code][0]
     return f'{nom} activé : **{apres-avant:+d} ❄️**. Nouveau solde : **{apres}**.',True
 
+# Une rencontre surprise est tentée après un cadeau ou un achat réussi.
+# 30 % de chance par action, une rencontre automatique maximum par jour et par joueur.
+def rencontre_aleatoire(uid):
+    with db_open() as db:
+        db.execute('BEGIN IMMEDIATE')
+        cle=f'rencontre_auto:{uid}:{jour()}'
+        if db.execute('SELECT 1 FROM etat_marche WHERE cle=?',(cle,)).fetchone(): return None
+        if random.random() >= .30: return None
+        avant=balance(db,uid)
+        delta=random.randint(-5,10)
+        apres=max(0,avant+delta)
+        db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?',(apres,uid))
+        db.execute('INSERT INTO etat_marche(cle,valeur) VALUES (?,?)',(cle,str(apres-avant)))
+    return f'🎲 **Malfred surgit de nulle part !**\nRencontre surprise : **{apres-avant:+d} ❄️**\nNouveau solde : **{apres} ❄️**.'
+
+async def tenter_rencontre(i):
+    msg=rencontre_aleatoire(i.user.id)
+    if msg: await publier(i,'🎲 RENCONTRE ALÉATOIRE',msg,discord.Color.purple(),'rencontre')
+
 async def publier(interaction,titre,texte,couleur,scene='achat'):
     salon=interaction.channel
     if not salon or not hasattr(salon,'send'): return False
@@ -269,20 +272,17 @@ def accueil_embed():
         e.add_field(name=f'{E[emoji]} {label}',value=desc,inline=True)
     e.set_footer(text='Malfred décline toute responsabilité pour tes décisions.')
     return image(e,'accueil')
-
 def cadeaux_embed():
     e=discord.Embed(title=f"{E['amoureux']} LES CADEAUX PIÉGÉS",description=phrase('cadeaux')+' 😈\n**Un cadeau par jour.**',color=discord.Color.red())
     for n,emoji in [(1,'amoureux'),(2,'riche'),(3,'mort')]:
         chance,gains,pertes,nom=CADEAUX[n]
         e.add_field(name=f'{E[emoji]} {nom} · {chance} %',value=f'🟢 Gain : **{gains[0]} à {gains[1]}** ❄️\n🔻 Perte : **{pertes[0]} à {pertes[1]}** ❄️',inline=False)
     return image(e,'cadeaux')
-
 def boutique_embed():
     e=discord.Embed(title=f"{E['riche']} LA BOUTIQUE DE MALFRED",description=phrase('boutique')+' 😈',color=discord.Color.green())
     for nom,prix,desc in OBJETS.values(): e.add_field(name=f'{nom} — {prix} ❄️',value=desc,inline=False)
     e.set_footer(text='1 achat normal par jour • Objets activables depuis l’inventaire')
     return image(e,'boutique')
-
 def inventaire_embed(user):
     with db_open() as db:
         avant=balance(db,user.id)
@@ -295,7 +295,6 @@ def inventaire_embed(user):
     if actifs: desc+='\n\n**Effets activés :** '+', '.join(actifs)
     e=discord.Embed(title=f'🎒 Inventaire de {user.display_name}',description=desc+f"\n\n{E['flocon']} **{avant} flocons**",color=discord.Color.gold())
     return image(e,'inventaire')
-
 def classement_embed():
     with db_open() as db: scores=db.execute('SELECT user_id,flocons FROM joueurs ORDER BY flocons DESC,user_id ASC LIMIT 10').fetchall()
     desc='\n'.join(f'**{i}.** <@{uid}> — **{n} ❄️**' for i,(uid,n) in enumerate(scores,1)) or 'Personne à plumer pour le moment.'
@@ -308,6 +307,7 @@ class CadeauxView(discord.ui.View):
         if not ok: return await interaction.response.send_message(texte,ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         publie=await publier(interaction,f"{E['flocon']} LE VERDICT DE MALFRED",texte,couleur,scene)
+        await tenter_rencontre(interaction)
         await interaction.followup.send('🎄 Résultat visible dans le salon !' if publie else '⚠️ Cadeau enregistré, annonce impossible : vérifie les permissions.',ephemeral=True)
     @discord.ui.button(label='Friandise suspecte',emoji=button_emoji('amoureux'),style=discord.ButtonStyle.success,custom_id='malfred:ouvrir:1')
     async def choix1(self,i,b): await self.jouer(i,1)
@@ -322,10 +322,11 @@ class ConfirmerAchat(discord.ui.View):
     async def confirmer(self,i,b):
         msg,ok=achat_normal(i.user.id,self.code)
         await i.response.edit_message(content='✅ Achat enregistré dans ton inventaire !' if ok else msg,embed=None,view=None)
-        if ok: await publier(i,'🛒 UNE NOUVELLE ARNAQUE !',msg,discord.Color.green(),'achat')
+        if ok:
+            await publier(i,'🛒 UNE NOUVELLE ARNAQUE !',msg,discord.Color.green(),'achat')
+            await tenter_rencontre(i)
     @discord.ui.button(label='Annuler',style=discord.ButtonStyle.secondary)
     async def annuler(self,i,b): await i.response.edit_message(content='Achat annulé.',embed=None,view=None)
-
 class ChoixObjet(discord.ui.Select):
     def __init__(self):
         opts=[discord.SelectOption(label=nom.split(' ',1)[1],value=code,description=f'{prix} flocons — {desc}'[:100],emoji=nom.split(' ',1)[0]) for code,(nom,prix,desc) in OBJETS.items()]
@@ -333,7 +334,6 @@ class ChoixObjet(discord.ui.Select):
     async def callback(self,i):
         code=self.values[0];nom,prix,desc=OBJETS[code]
         await i.response.send_message(embed=discord.Embed(title=nom,description=f'{desc}\n\n**Prix : {prix} ❄️**\nConfirmer ?',color=discord.Color.gold()),view=ConfirmerAchat(code),ephemeral=True)
-
 class BoutiqueView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None);self.add_item(ChoixObjet())
     @discord.ui.button(label='Inventaire',emoji=button_emoji('machiavelique'),style=discord.ButtonStyle.secondary,custom_id='malfred:boutique:inventaire',row=1)
@@ -341,15 +341,33 @@ class BoutiqueView(discord.ui.View):
     @discord.ui.button(label='Mes flocons',emoji=button_emoji('flocon'),style=discord.ButtonStyle.secondary,custom_id='malfred:boutique:flocons',row=1)
     async def flocons(self,i,b): await i.response.send_message(f'❄️ Tu as **{solde(i.user.id)} flocons**.',ephemeral=True)
 
+# Correction : choix parmi les objets réellement possédés.
+class ActivationSelect(discord.ui.Select):
+    def __init__(self, options): super().__init__(placeholder='Choisis ton objet…',options=options)
+    async def callback(self,i):
+        code=self.values[0]
+        if code=='noir_miroir':
+            return await i.response.edit_message(content='🪞 Utilise `/miroir_voir` pour choisir ton cadeau.',view=None)
+        if code=='noir_sablier':
+            return await i.response.edit_message(content='⌛ Utilise `/rejouer` après ton cadeau.',view=None)
+        msg,ok=activer(i.user.id,code)
+        await i.response.edit_message(content=msg,view=None)
+        if ok: await publier(i,'🎒 OBJET ACTIVÉ',msg,discord.Color.purple(),'rencontre' if code=='boule' else 'activation')
+class ActivationView(discord.ui.View):
+    def __init__(self,options): super().__init__(timeout=120);self.add_item(ActivationSelect(options))
 class InventaireView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label='Utiliser la boule à neige',emoji=button_emoji('flocon'),style=discord.ButtonStyle.primary,custom_id='malfred:inventaire:boule')
-    async def boule(self,i,b):
-        msg,ok=activer(i.user.id,'boule')
-        if not ok: return await i.response.send_message(msg,ephemeral=True)
-        await i.response.defer(ephemeral=True)
-        await publier(i,'🔮 RENCONTRE IMPROBABLE',msg,discord.Color.purple(),'rencontre')
-        await i.followup.send('🔮 Rencontre enregistrée !',ephemeral=True)
+    @discord.ui.button(label='Utiliser un objet',emoji='🎒',style=discord.ButtonStyle.primary,custom_id='malfred:inventaire:utiliser')
+    async def utiliser(self,i,b):
+        with db_open() as db:
+            rows=db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=? AND quantite>0 ORDER BY objet',(i.user.id,)).fetchall()
+        options=[]
+        for code,q in rows:
+            if code in ('canard','noir_canard'): continue
+            infos=OBJETS.get(code) or NOIR.get(code)
+            if infos: options.append(discord.SelectOption(label=infos[0][:100],value=code))
+        if not options: return await i.response.send_message('🎒 Aucun objet utilisable dans ton inventaire.',ephemeral=True)
+        await i.response.send_message('🎒 Quel objet veux-tu utiliser ?',view=ActivationView(options),ephemeral=True)
 
 class AccueilView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
@@ -369,8 +387,7 @@ class AccueilView(discord.ui.View):
         if e is None: return await i.response.send_message('🕯️ Marché fermé. Reviens quand Malfred aura décidé.',ephemeral=True)
         await i.response.send_message(embed=e,view=vue,ephemeral=True)
 
-
-# --- Calendrier /fesses : jeu indépendant des flocons ---
+# Calendrier privé de Doc : conservé indépendamment du jeu.
 FESSES_PHRASES = [
     'Doc, ton dévouement à la recherche scientifique est inquiétant.',
     'Une case de moins. Une dignité de moins.',
@@ -381,27 +398,21 @@ FESSES_PHRASES = [
     'Encore un peu de patience. Ou beaucoup. Je ne sais plus.',
     'Je sens que tu vas adorer. Enfin, je vais adorer.',
 ]
-
 def fesses_etat(db, annee):
     row = db.execute('SELECT cases, dernier_jour FROM fesses_calendrier WHERE annee=?', (annee,)).fetchone()
-    if row:
-        return json.loads(row[0]), row[1]
+    if row: return json.loads(row[0]), row[1]
     db.execute('INSERT INTO fesses_calendrier(annee,cases,dernier_jour) VALUES (?,?,NULL)', (annee, '[]'))
     return [], None
 
 def fesses_image(cases, finale=False):
-    # Avant le 24, on ne montre QUE la fausse illustration.
-    # Le 24, remplacement intégral par le canard de Malfred.
     source_path = FESSES_TROLL_PATH if finale else FESSES_IMAGE_PATH
-    with Image.open(source_path) as source:
-        im = source.convert('RGB')
+    with Image.open(source_path) as source: im = source.convert('RGB')
     if not finale:
         w, h = im.size
         draw = ImageDraw.Draw(im)
         colonnes, lignes = 6, 4
         for numero in range(24):
-            if numero in cases:
-                continue
+            if numero in cases: continue
             x0 = numero % colonnes * w // colonnes
             y0 = numero // colonnes * h // lignes
             x1 = (numero % colonnes + 1) * w // colonnes - 1
@@ -433,26 +444,17 @@ async def fesses(interaction: discord.Interaction):
             texte='🍑 Doc, tu as déjà ouvert ta case aujourd’hui ! Reviens demain.'
             nouveau=False
         else:
-            # Le 24, toutes les cases sont dévoilées et le piège apparaît.
-            if date.day == 24:
-                cases=list(range(24))
+            if date.day == 24: cases=list(range(24))
             else:
                 restantes=[n for n in range(24) if n not in cases]
-                if restantes:
-                    cases.append(random.choice(restantes))
-            db.execute('UPDATE fesses_calendrier SET cases=?, dernier_jour=? WHERE annee=?',
-                       (json.dumps(cases),today,date.year))
+                if restantes: cases.append(random.choice(restantes))
+            db.execute('UPDATE fesses_calendrier SET cases=?, dernier_jour=? WHERE annee=?', (json.dumps(cases),today,date.year))
             nouveau=True
-            texte=('🦆 **ESSAIE ENCORE, GROS MALIN !**\n'
-                   '24 jours à attendre les fesses du Chaton… pour recevoir celles d’un canard.\n'
-                   '— Malfred, expert en arnaques de Noël 💚' if date.day==24 else
-                   f'🍑 **Case dévoilée : {len(cases)}/24 !**\n{random.choice(FESSES_PHRASES)}')
+            texte=('🦆 **ESSAIE ENCORE, GROS MALIN !**\n24 jours à attendre les fesses du Chaton… pour recevoir celles d’un canard.\n— Malfred, expert en arnaques de Noël 💚' if date.day==24 else f'🍑 **Case dévoilée : {len(cases)}/24 !**\n{random.choice(FESSES_PHRASES)}')
     finale=date.day==24 and len(cases)==24
     try:
         fichier=fesses_image(cases,finale=finale)
-        embed=discord.Embed(title='🍑 LE CALENDRIER INTERDIT DE DOC',
-                            description=texte if nouveau else texte+f'\nCases ouvertes : **{len(cases)}/24**',
-                            color=discord.Color.from_rgb(142,34,67))
+        embed=discord.Embed(title='🍑 LE CALENDRIER INTERDIT DE DOC', description=texte if nouveau else texte+f'\nCases ouvertes : **{len(cases)}/24**', color=discord.Color.from_rgb(142,34,67))
         embed.set_image(url='attachment://calendrier_doc.png')
         await interaction.followup.send(embed=embed,file=fichier)
     except FileNotFoundError:
@@ -488,38 +490,25 @@ async def reset_cadeau(i:discord.Interaction,joueur:discord.User):
         db.execute('UPDATE joueurs SET dernier_cadeau=NULL WHERE user_id=?',(joueur_id,))
     await i.response.send_message(f'✅ Cadeau réinitialisé pour {joueur.mention}, flocons inchangés.',ephemeral=True)
 
-# Remise à zéro globale pour terminer les tests avant le lancement.
-# Confirmation explicite et réservée à la personne qui lance la commande.
 class ConfirmationResetTotal(discord.ui.View):
     def __init__(self, auteur_id: int):
         super().__init__(timeout=60)
         self.auteur_id = auteur_id
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.auteur_id or not staff(interaction):
             await interaction.response.send_message('🔒 Cette confirmation ne t’appartient pas.', ephemeral=True)
             return False
         return True
-
     @discord.ui.button(label='Oui, tout remettre à zéro', style=discord.ButtonStyle.danger)
     async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Une seule transaction : les joueurs existants conservent leur identifiant,
-        # mais récupèrent tous le solde initial et perdent leur progression.
         with db_open() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE joueurs SET flocons=20, dernier_cadeau=NULL')
-            for table in ('boutique_joueurs', 'inventaire', 'activations',
-                          'marches', 'achats_noirs', 'etat_marche', 'tirages',
-                          'dettes', 'participations_evenements'):
+            for table in ('boutique_joueurs', 'inventaire', 'activations', 'marches', 'achats_noirs', 'etat_marche', 'tirages', 'dettes', 'participations_evenements'):
                 db.execute(f'DELETE FROM {table}')
             nb = db.execute('SELECT COUNT(*) FROM joueurs').fetchone()[0]
         self.stop()
-        await interaction.response.edit_message(
-            content=f'✅ **Remise à zéro terminée !** {nb} joueur(s) à 20 flocons. '
-                    'Inventaires, bonus, dettes, cadeaux, achats, événements et marchés effacés. '
-                    'Tu peux maintenant relancer `/admin_ouvrir_marche` pour tester.',
-            view=None)
-
+        await interaction.response.edit_message(content=f'✅ **Remise à zéro terminée !** {nb} joueur(s) à 20 flocons. Inventaires, bonus, dettes, cadeaux, achats, événements et marchés effacés. Tu peux maintenant relancer `/admin_ouvrir_marche` pour tester.',view=None)
     @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
     async def annuler(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
@@ -528,102 +517,68 @@ class ConfirmationResetTotal(discord.ui.View):
 @bot.tree.command(name='admin_reset_total', description='Staff : remettre TOUS les joueurs à 20 flocons et effacer les tests')
 @app_commands.guild_only()
 async def admin_reset_total(interaction: discord.Interaction):
-    if not staff(interaction):
-        await interaction.response.send_message('🔒 Réservé au staff.', ephemeral=True)
-        return
-    await interaction.response.send_message(
-        '⚠️ **ATTENTION : remise à zéro GLOBALE et irréversible !**\n'
-        'Tous les joueurs reviendront à **20 flocons**. Objets, bonus, dettes, '
-        'cadeaux quotidiens, achats, marchés et événements seront effacés.\n\n'
-        'Confirmer la suppression des données de test ?',
-        view=ConfirmationResetTotal(interaction.user.id), ephemeral=True)
+    if not staff(interaction): return await interaction.response.send_message('🔒 Réservé au staff.', ephemeral=True)
+    await interaction.response.send_message('⚠️ **ATTENTION : remise à zéro GLOBALE et irréversible !**\nTous les joueurs reviendront à **20 flocons**. Objets, bonus, dettes, cadeaux quotidiens, achats, marchés et événements seront effacés.\n\nConfirmer la suppression des données de test ?',view=ConfirmationResetTotal(interaction.user.id),ephemeral=True)
 
 def marche_panneau():
-    with db_open() as db:
-        marche = marche_actuel(db)
-    if not marche:
-        return None, None
+    with db_open() as db: marche = marche_actuel(db)
+    if not marche: return None, None
     mid, fin, offres = marche
     codes = offres.split(',')
     fermeture = datetime.fromisoformat(fin).astimezone(TZ).strftime('%d/%m à %H:%M')
-    e = discord.Embed(
-        title=f"{E['machiavelique']} MALFRED ET SON MARCHÉ NOIR",
-        description=(f"Stock illimité • 2 achats par ouverture\nFerme le **{fermeture}** (heure suisse)\n\n"
-                     + '\n'.join(f"**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}" for k in codes)),
-        color=discord.Color.dark_purple())
+    e = discord.Embed(title=f"{E['machiavelique']} MALFRED ET SON MARCHÉ NOIR",description=(f"Stock illimité • 2 achats par ouverture\nFerme le **{fermeture}** (heure suisse)\n\n"+'\n'.join(f"**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}" for k in codes)),color=discord.Color.dark_purple())
     return image(e, 'marche'), MarcheView(codes)
 
 class EntreeMarche(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label='Entrer au Marché Noir', emoji=button_emoji('machiavelique'),
-                       style=discord.ButtonStyle.primary, custom_id='malfred:marche:entrer')
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label='Entrer au Marché Noir', emoji=button_emoji('machiavelique'),style=discord.ButtonStyle.primary, custom_id='malfred:marche:entrer')
     async def entrer(self, i:discord.Interaction, b:discord.ui.Button):
         e, vue = marche_panneau()
-        if e is None:
-            return await i.response.send_message('🕯️ Trop tard ! Malfred a fermé boutique.', ephemeral=True)
+        if e is None: return await i.response.send_message('🕯️ Trop tard ! Malfred a fermé boutique.', ephemeral=True)
         await i.response.send_message(embed=e, view=vue, ephemeral=True)
 
 class MarcheView(discord.ui.View):
     def __init__(self, offres):
         super().__init__(timeout=300)
-        # Quatre boutons directs, un par marchandise du jour.
         for index, code in enumerate(offres):
-            bouton = discord.ui.Button(label=NOIR[code][0].split(' ', 1)[-1][:70],
-                style=discord.ButtonStyle.secondary, row=index//2)
+            bouton = discord.ui.Button(label=NOIR[code][0].split(' ', 1)[-1][:70],style=discord.ButtonStyle.secondary,row=index//2)
             async def choisir(i:discord.Interaction, code=code):
-                with db_open() as db:
-                    marche=marche_actuel(db)
-                if not marche or code not in marche[2].split(','):
-                    return await i.response.send_message('🕯️ Cette offre a disparu.', ephemeral=True)
-                e=discord.Embed(title=NOIR[code][0],
-                    description=f"{NOIR[code][2]}\n\n**Coût : {NOIR[code][1]}**\nTu confirmes ?",
-                    color=discord.Color.dark_purple())
+                with db_open() as db: marche=marche_actuel(db)
+                if not marche or code not in marche[2].split(','): return await i.response.send_message('🕯️ Cette offre a disparu.', ephemeral=True)
+                e=discord.Embed(title=NOIR[code][0],description=f"{NOIR[code][2]}\n\n**Coût : {NOIR[code][1]}**\nTu confirmes ?",color=discord.Color.dark_purple())
                 await i.response.send_message(embed=e, view=MarcheConfirm(code), ephemeral=True)
             bouton.callback=choisir
             self.add_item(bouton)
 
 class MarcheConfirm(discord.ui.View):
-    def __init__(self,code):
-        super().__init__(timeout=120)
-        self.code=code
+    def __init__(self,code): super().__init__(timeout=120);self.code=code
     @discord.ui.button(label='Acheter',emoji=button_emoji('riche'),style=discord.ButtonStyle.success)
     async def oui(self,i,b):
         if self.code=='noir_miroir':
             with db_open() as db:
-                options=[discord.SelectOption(label=(OBJETS[k][0] if k in OBJETS else NOIR[k][0])[:90],value=k)
-                    for k,q in db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=?',(i.user.id,))
-                    if q>0 and k!='noir_miroir' and (k in OBJETS or k in NOIR)]
-            if not options:
-                return await i.response.edit_message(content='Tu n’as aucun objet à sacrifier.',embed=None,view=None)
+                options=[discord.SelectOption(label=(OBJETS[k][0] if k in OBJETS else NOIR[k][0])[:90],value=k) for k,q in db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=?',(i.user.id,)) if q>0 and k!='noir_miroir' and (k in OBJETS or k in NOIR)]
+            if not options: return await i.response.edit_message(content='Tu n’as aucun objet à sacrifier.',embed=None,view=None)
             return await i.response.edit_message(content='Quel objet sacrifier ?',embed=None,view=SacrificeView(options))
         msg,ok=achat_noir(i.user.id,self.code)
         await i.response.edit_message(content=msg,embed=None,view=None)
         if ok: await publier(i,'🕯️ ACHAT CLANDESTIN',msg,discord.Color.dark_purple(),'achat')
     @discord.ui.button(label='Annuler',style=discord.ButtonStyle.secondary)
-    async def non(self,i,b):
-        await i.response.edit_message(content='Achat annulé. Malfred te juge en silence.',embed=None,view=None)
+    async def non(self,i,b): await i.response.edit_message(content='Achat annulé. Malfred te juge en silence.',embed=None,view=None)
 
 class SacrificeSelect(discord.ui.Select):
-    def __init__(self,options):
-        super().__init__(placeholder='Choisir un objet à sacrifier',options=options)
+    def __init__(self,options): super().__init__(placeholder='Choisir un objet à sacrifier',options=options)
     async def callback(self,i):
         msg,ok=achat_noir(i.user.id,'noir_miroir',self.values[0])
         await i.response.edit_message(content=msg,embed=None,view=None)
         if ok: await publier(i,'🕯️ ÉCHANGE CLANDESTIN',msg,discord.Color.dark_purple(),'sacrifice')
 class SacrificeView(discord.ui.View):
-    def __init__(self,options):
-        super().__init__(timeout=120)
-        self.add_item(SacrificeSelect(options))
+    def __init__(self,options): super().__init__(timeout=120);self.add_item(SacrificeSelect(options))
 
 @bot.tree.command(name='marche',description='Voir le Marché Noir surprise de Malfred')
 async def cmd_marche(i:discord.Interaction):
     e,vue=marche_panneau()
-    if e is None:
-        return await i.response.send_message('🕯️ Le Marché Noir est fermé.',ephemeral=True)
+    if e is None: return await i.response.send_message('🕯️ Le Marché Noir est fermé.',ephemeral=True)
     await i.response.send_message(embed=e,view=vue,ephemeral=True)
-
 @bot.tree.command(name='activer',description='Activer manuellement un objet de ton inventaire')
 @app_commands.describe(objet='Code affiché dans /inventaire')
 async def cmd_activer(i:discord.Interaction,objet:str):
@@ -650,7 +605,6 @@ async def cmd_miroir(i:discord.Interaction,choix:int):
             db.execute('INSERT INTO etat_marche(cle,valeur) VALUES (?,?)',(f'miroir:{uid}',f'{choix}:'+('gain' if victoire else 'perte')))
             msg=f'🪞 Pour **{CADEAUX[choix][3]}**, le miroir annonce **'+('un gain' if victoire else 'une perte')+'**. Ouvre ce cadeau ou renonce.'
     await i.response.send_message(msg,ephemeral=True)
-
 @bot.tree.command(name='renoncer_cadeau',description='Renoncer après consultation du miroir')
 async def cmd_renoncer(i:discord.Interaction):
     with db_open() as db:
@@ -662,7 +616,6 @@ async def cmd_renoncer(i:discord.Interaction):
             db.execute('DELETE FROM etat_marche WHERE cle=?',(key,))
             msg='🪞 Tu renonces au cadeau du jour.'
     await i.response.send_message(msg,ephemeral=True)
-
 @bot.tree.command(name='rejouer',description='Utiliser le sablier pour rejouer le cadeau du jour')
 async def cmd_rejouer(i:discord.Interaction):
     uid=i.user.id
@@ -705,15 +658,12 @@ async def admin_ouvrir_marche(i:discord.Interaction):
                 await salon.send(embed=image(discord.Embed(title='🕯️ LE MARCHÉ NOIR EST OUVERT !',description='Psst… marchandises douteuses, stock illimité et seulement six heures pour en profiter !',color=discord.Color.dark_purple()),'marche'),view=EntreeMarche())
             except discord.HTTPException: logging.exception('Annonce Marché Noir impossible')
 
-# Quatre événements gratuits et indépendants des boutiques / cadeaux.
 EVENEMENTS={5:('hotte','🎁 La Hotte des Regrets'),12:('casino','🎰 Le Casino du Lutin'),19:('tempete','❄️ La Tempête des Flocons'),24:('finale','👑 Le Dernier Coup de Malfred')}
-
 def evenement_actuel():
     t=now()
     if t.month!=12 or t.day not in EVENEMENTS or t.year!=2026: return None
     if t.day==24 and t.hour>=21: return None
     return EVENEMENTS[t.day]
-
 def jouer_evenement(uid,choix):
     ev=evenement_actuel()
     if not ev: return '🎪 Aucun grand événement ouvert actuellement.',False,None
@@ -723,9 +673,7 @@ def jouer_evenement(uid,choix):
         if db.execute('SELECT 1 FROM participations_evenements WHERE user_id=? AND evenement=?',(uid,code)).fetchone(): return 'Tu as déjà participé à cet événement.',False,None
         if code=='hotte':
             if choix not in (1,2,3): return 'Choisis un des trois sacs.',False,None
-            # Chaque sac donne un tirage indépendant, non annoncé à l'avance.
-            delta=random.choice([-5,-3,0,3,6,9,12])
-            detail=f'Sac n°{choix} ouvert !'
+            delta=random.choice([-5,-3,0,3,6,9,12]);detail=f'Sac n°{choix} ouvert !'
         elif code=='casino':
             if choix!=1: return 'Actionne la machine à sous.',False,None
             symbols=[random.choice(['🍒','🔔','❄️','🦆']) for _ in range(3)]
@@ -743,7 +691,6 @@ def jouer_evenement(uid,choix):
         db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?',(apres,uid))
         db.execute('INSERT INTO participations_evenements(user_id,evenement) VALUES (?,?)',(uid,code))
     return f'**{nom}**\n{detail}\nRésultat : **{apres-avant:+d} ❄️**\nNouveau solde : **{apres} ❄️**.',True,code
-
 class EvenementView(discord.ui.View):
     def __init__(self,code):
         super().__init__(timeout=300)
@@ -759,7 +706,6 @@ class EvenementView(discord.ui.View):
                 if ok: await publier(i,'🎪 GRAND ÉVÉNEMENT',msg,discord.Color.gold(),scene)
             btn.callback=callback
             self.add_item(btn)
-
 @bot.tree.command(name='evenement',description='Participer au grand événement du jour')
 async def cmd_evenement(i:discord.Interaction):
     ev=evenement_actuel()
@@ -790,7 +736,6 @@ async def entretien_marche():
                             fin=t+timedelta(hours=6)
                             db.execute('INSERT INTO marches(debut,fin,offres) VALUES (?,?,?)',(t.isoformat(),fin.isoformat(),','.join(random.sample(list(NOIR),4))))
                             annonce=True
-                # Signaler la fermeture une seule fois, après expiration.
                 last=db.execute('SELECT id,fin FROM marches ORDER BY id DESC LIMIT 1').fetchone()
                 if last and datetime.fromisoformat(last[1])<=t:
                     cle=f'fermeture:{last[0]}'
@@ -804,7 +749,6 @@ async def entretien_marche():
                     if montant>paye:
                         demain=(t.date()+timedelta(days=1)).isoformat()
                         db.execute('INSERT INTO dettes(user_id,echeance,montant) VALUES (?,?,?) ON CONFLICT(user_id,echeance) DO UPDATE SET montant=montant+excluded.montant',(uid,demain,montant-paye))
-                # Bonus du canard doré le 24, attribué une seule fois.
                 if t.year==2026 and t.month==12 and t.day==24:
                     for (uid,) in db.execute("SELECT user_id FROM inventaire WHERE objet='noir_canard' AND quantite>0").fetchall():
                         cle=f'canard_bonus:{uid}'
@@ -831,10 +775,8 @@ async def setup_hook():
     else: result=await bot.tree.sync()
     logging.info('%s commandes synchronisées',len(result))
 bot.setup_hook=setup_hook
-
 @bot.event
 async def on_ready(): logging.info('🎄 Malfred connecté : %s',bot.user)
-
 @bot.tree.error
 async def on_slash_error(i:discord.Interaction,error:app_commands.AppCommandError):
     logging.exception('Erreur commande : %r',error)
@@ -842,7 +784,6 @@ async def on_slash_error(i:discord.Interaction,error:app_commands.AppCommandErro
         if i.response.is_done(): await i.followup.send('⚠️ Malfred a trébuché dans une congère.',ephemeral=True)
         else: await i.response.send_message('⚠️ Malfred a trébuché dans une congère.',ephemeral=True)
     except discord.HTTPException: pass
-
 if __name__=='__main__':
     init_db()
     token=os.getenv('DISCORD_TOKEN')
