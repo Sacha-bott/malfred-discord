@@ -261,8 +261,8 @@ async def publier(interaction,titre,texte,couleur,scene='achat'):
         return False
 
 def accueil_embed():
-    e=discord.Embed(title=f"{E['machiavelique']} MALFRED — LE LUTIN DU CHAOS",description=phrase('accueil')+' 😈\n\nChoisis une activité ci-dessous :',color=discord.Color.dark_green())
-    for label,desc,emoji in [('Cadeaux','Un pari chaque jour','amoureux'),('Boutique','Dépense tes flocons','riche'),('Inventaire','Tes trouvailles douteuses','machiavelique'),('Classement','Les plus riches','riche')]:
+    e=discord.Embed(title=f"{E['fume']} MALFRED — LE LUTIN DU CHAOS",description=phrase('accueil')+' 😈\n\nChoisis une activité ci-dessous :',color=discord.Color.dark_green())
+    for label,desc,emoji in [('Cadeaux','Un pari chaque jour','amoureux'),('Boutique','Dépense tes flocons','riche'),('Inventaire','Tes trouvailles douteuses','machiavelique'),('Classement','Les plus riches','moquerie')]:
         e.add_field(name=f'{E[emoji]} {label}',value=desc,inline=True)
     e.set_footer(text='Malfred décline toute responsabilité pour tes décisions.')
     return image(e,'accueil')
