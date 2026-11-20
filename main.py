@@ -33,21 +33,26 @@ EMOJI_IDS = {
 E = {k: f'<:malfred_{k}:{v}>' for k, v in EMOJI_IDS.items()}
 def button_emoji(key): return discord.PartialEmoji(name=f'malfred_{key}', id=EMOJI_IDS[key])
 
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+class MalfredCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Contrôle exécuté avant chaque commande slash, même si Discord
+        # continue à afficher la commande dans son interface.
+        if interaction.channel_id == CALENDAR_CHANNEL_ID:
+            return True
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                '🎄 Malfred ne joue que dans le salon Calendrier de l’Avent !',
+                ephemeral=True,
+            )
+        return False
 
-# Vérification globale de TOUTES les commandes slash, y compris les commandes admin.
-# Le refus est privé pour éviter de polluer les autres salons.
-@bot.tree.interaction_check
-async def limiter_commandes_au_calendrier(interaction: discord.Interaction) -> bool:
-    if interaction.channel_id == CALENDAR_CHANNEL_ID:
-        return True
-    if not interaction.response.is_done():
-        await interaction.response.send_message(
-            '🎄 Malfred ne joue que dans le salon Calendrier de l’Avent !',
-            ephemeral=True,
-        )
-    return False
+intents = discord.Intents.default()
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned,
+    intents=intents,
+    tree_cls=MalfredCommandTree,
+)
+
 OBJETS = {
     'bouclier': ('🛡️ Bouclier givré', 25, 'Protège contre la prochaine perte du cadeau quotidien.'),
     'trefle': ('🍀 Trèfle douteux', 15, '+15 points de chance sur le prochain cadeau.'),
