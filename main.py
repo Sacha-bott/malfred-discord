@@ -480,6 +480,40 @@ async def cmd_rencontre(i:discord.Interaction):
     if ok: await publier(i,'🔮 RENCONTRE IMPROBABLE',msg,discord.Color.purple(),'rencontre')
 
 def staff(i): return i.user.id in STAFF_IDS or (isinstance(i.user,discord.Member) and i.user.guild_permissions.manage_guild)
+# Tests staff : aucune modification des flocons, de l'inventaire ou du calendrier réel.
+@bot.tree.command(name='admin_test_rencontre', description='Staff : prévisualiser une rencontre surprise')
+@app_commands.guild_only()
+async def admin_test_rencontre(i:discord.Interaction):
+    if not staff(i):
+        return await i.response.send_message('🔒 Réservé au staff.',ephemeral=True)
+    delta=random.randint(-5,10)
+    texte=(f'🎲 **Malfred surgit de nulle part !**\n'
+           f'Rencontre surprise : **{delta:+d} ❄️**\n'
+           '🧪 **Simulation : aucun flocon ajouté ou retiré.**')
+    embed=discord.Embed(title='🎲 TEST — RENCONTRE ALÉATOIRE',description=texte,color=discord.Color.purple())
+    await i.response.send_message(embed=image(embed,'rencontre'),ephemeral=True)
+
+@bot.tree.command(name='admin_test_fesses', description='Staff : prévisualiser le calendrier de Doc')
+@app_commands.describe(jour_test='Jour à afficher (1 à 24)')
+@app_commands.guild_only()
+async def admin_test_fesses(i:discord.Interaction,jour_test:app_commands.Range[int,1,24]):
+    if not staff(i):
+        return await i.response.send_message('🔒 Réservé au staff.',ephemeral=True)
+    await i.response.defer(ephemeral=True)
+    # Simulation uniquement : aucun accès ni écriture dans fesses_calendrier.
+    cases=list(range(jour_test))
+    finale=(jour_test==24)
+    try:
+        fichier=fesses_image(cases,finale=finale)
+        texte=(f'🧪 **Prévisualisation du jour {jour_test}/24** — aucune case réelle ouverte.\n'
+               + ('🦆 Surprise finale de Malfred !' if finale else random.choice(FESSES_PHRASES)))
+        embed=discord.Embed(title='🍑 TEST — CALENDRIER DE DOC',description=texte,color=discord.Color.from_rgb(142,34,67))
+        embed.set_image(url='attachment://calendrier_doc.png')
+        await i.followup.send(embed=embed,file=fichier,ephemeral=True)
+    except FileNotFoundError:
+        logging.exception('Illustration calendrier de test introuvable')
+        await i.followup.send('⚠️ Image introuvable : vérifie les chemins MALFRED_FESSES_IMAGE et MALFRED_FESSES_TROLL_IMAGE.',ephemeral=True)
+
 @bot.tree.command(name='admin_reset_cadeau',description='Staff : réinitialise le cadeau du jour')
 @app_commands.describe(joueur='Joueur à réinitialiser')
 @app_commands.guild_only()
