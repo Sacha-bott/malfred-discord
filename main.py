@@ -19,7 +19,8 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0') or 0)
 MARKET_CHANNEL_ID = int(os.getenv('MALFRED_CHANNEL_ID', '0') or 0)
 DOC_USER_ID = 124122224016752640
-FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_final.png')
+FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_mere_noel.png')
+FESSES_TROLL_PATH = os.getenv('MALFRED_FESSES_TROLL_IMAGE', 'assets/fesses_final.png')
 STAFF_IDS = {int(s.strip()) for s in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if s.strip().isdigit()}
 
 # IDs recopiés des emotes Discord fournies par Saphi.
@@ -393,35 +394,29 @@ def fesses_etat(db, annee):
     return [], None
 
 def fesses_image(cases, finale=False):
-    # Une seule illustration de base ; les caches sont dessinés en mémoire.
-    with Image.open(FESSES_IMAGE_PATH) as source:
+    # Avant le 24, on ne montre QUE la fausse illustration.
+    # Le 24, remplacement intégral par le canard de Malfred.
+    source_path = FESSES_TROLL_PATH if finale else FESSES_IMAGE_PATH
+    with Image.open(source_path) as source:
         im = source.convert('RGB')
-    w,h=im.size
-    draw=ImageDraw.Draw(im)
-    colonnes,lignes=6,4
-    for numero in range(24):
-        if finale or numero in cases:
-            continue
-        x0=numero%colonnes*w//colonnes
-        y0=numero//colonnes*h//lignes
-        x1=(numero%colonnes+1)*w//colonnes
-        y1=(numero//colonnes+1)*h//lignes
-        draw.rectangle((x0,y0,x1,y1), fill=('#831d32' if (numero+numero//colonnes)%2 else '#174d3c'),outline='#d6aa53',width=5)
-        draw.text((x0+18,y0+12),str(numero+1),fill='#fff0cb',stroke_width=1,stroke_fill='#462313')
-        draw.text((x0+(x1-x0)//2-9,y0+(y1-y0)//2-15),'✦',fill='#f2c976')
     if not finale:
-        # Cache supplémentaire permanent : empêche de lire le panneau, de
-        # reconnaître Malfred et de découvrir le canard avant le 24.
-        for box in [(0,0,int(w*.39),int(h*.57)),
-                    (int(w*.39),0,w,int(h*.53)),
-                    (int(w*.63),int(h*.43),w,h)]:
-            draw.rectangle(box,fill='#65253c',outline='#d6aa53',width=8)
-            cx=(box[0]+box[2])//2;cy=(box[1]+box[3])//2
-            draw.text((cx-35,cy-12),'???',fill='#f2c976')
-    out=io.BytesIO()
-    im.save(out,format='PNG',optimize=True)
+        w, h = im.size
+        draw = ImageDraw.Draw(im)
+        colonnes, lignes = 6, 4
+        for numero in range(24):
+            if numero in cases:
+                continue
+            x0 = numero % colonnes * w // colonnes
+            y0 = numero // colonnes * h // lignes
+            x1 = (numero % colonnes + 1) * w // colonnes - 1
+            y1 = (numero // colonnes + 1) * h // lignes - 1
+            fond = '#7c2436' if (numero + numero // colonnes) % 2 else '#195642'
+            draw.rectangle((x0, y0, x1, y1), fill=fond, outline='#e7c16c', width=5)
+            draw.text((x0 + 16, y0 + 12), str(numero + 1), fill='#fff1cb', stroke_width=1, stroke_fill='#3e1725')
+    out = io.BytesIO()
+    im.save(out, format='PNG', optimize=True)
     out.seek(0)
-    return discord.File(out,filename='calendrier_doc.png')
+    return discord.File(out, filename='calendrier_doc.png')
 
 @bot.tree.command(name='fesses', description='Le calendrier secret de Doc 🍑🎄')
 @app_commands.guild_only()
@@ -466,7 +461,7 @@ async def fesses(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed,file=fichier)
     except FileNotFoundError:
         logging.exception('Image /fesses manquante')
-        await interaction.followup.send('⚠️ Illustration introuvable : vérifier MALFRED_FESSES_IMAGE.',ephemeral=True)
+        await interaction.followup.send('⚠️ Illustration introuvable : vérifier assets/fesses_mere_noel.png et assets/fesses_final.png.',ephemeral=True)
 
 @bot.tree.command(name='malfred',description='Ouvre le menu interactif de Malfred 🎄')
 async def cmd_malfred(i:discord.Interaction): await i.response.send_message(embed=accueil_embed(),view=AccueilView())
