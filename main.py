@@ -957,8 +957,10 @@ def annonce_finale_embed(scores):
     desc = ('**LE VERDICT DU LUTIN EST TOMBÉ !**\n\n'
             + ('\n\n'.join(lignes) if lignes else 'Aucun participant cette année.')
             + '\n\nMes félicitations aux gagnants. Quant aux autres… merci pour les flocons, bande de pigeons à plumes ! 🦆😈')
-    return discord.Embed(title='👑 MALFRED — LE PODIUM FINAL 🎄', description=desc,
-                         color=discord.Color.gold()).set_footer(text='Classement figé le 24 décembre 2026 à 21 h (Suisse)')
+    embed = discord.Embed(title='👑 MALFRED — LE PODIUM FINAL 🎄', description=desc,
+                          color=discord.Color.gold())
+    embed.set_footer(text='Classement figé le 24 décembre 2026 à 21 h (Suisse)')
+    return image(embed, 'finale')
 
 @bot.tree.command(name='admin_test_finale', description='Staff : prévisualiser le podium sans terminer le concours')
 @app_commands.guild_only()
@@ -1089,24 +1091,26 @@ async def setup_hook():
     bot.add_view(EntreeMarche());bot.add_view(CadeauxView());bot.add_view(BoutiqueView());bot.add_view(InventaireView())
     asyncio.create_task(entretien_marche())
     asyncio.create_task(gerer_podium())
-    # Synchronisation globale + synchronisation immédiate sur le serveur cible.
-    # Les commandes globales seules peuvent prendre du temps à apparaître sur Discord.
-    globales = await bot.tree.sync()
-    logging.info('%s commandes globales synchronisées', len(globales))
+    # Synchroniser uniquement sur le serveur cible pour éviter les doublons.
     serveur_id = GUILD_ID
     if not serveur_id:
         try:
             canal = await bot.fetch_channel(CALENDAR_CHANNEL_ID)
             serveur_id = canal.guild.id
         except (discord.HTTPException, discord.Forbidden, AttributeError) as exc:
-            logging.warning('Serveur non détecté pour la synchronisation immédiate : %s', exc)
-    if serveur_id:
-        guild = discord.Object(id=serveur_id)
-        bot.tree.copy_global_to(guild=guild)
-        result = await bot.tree.sync(guild=guild)
-        logging.info('%s commandes synchronisées sur le serveur %s (dont /admin_test_finale)', len(result), serveur_id)
-    else:
-        logging.warning('Ajoute GUILD_ID dans Railway pour synchroniser immédiatement les commandes sur ton serveur.')
+            logging.warning('Serveur non détecté : %s', exc)
+    if not serveur_id:
+        logging.error('GUILD_ID requis pour synchroniser les commandes sans doublons.')
+        return
+    guild = discord.Object(id=serveur_id)
+    bot.tree.copy_global_to(guild=guild)
+    # Retirer les anciennes commandes globales enregistrées sur Discord.
+    # Les copies propres au serveur restent en place.
+    bot.tree.clear_commands(guild=None)
+    globales = await bot.tree.sync()
+    logging.info('%s commandes globales restantes', len(globales))
+    result = await bot.tree.sync(guild=guild)
+    logging.info('%s commandes synchronisées sur le serveur %s', len(result), serveur_id)
 bot.setup_hook=setup_hook
 @bot.event
 async def on_ready(): logging.info('🎄 Malfred connecté : %s',bot.user)
