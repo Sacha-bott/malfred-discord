@@ -3,6 +3,9 @@ import random
 import sqlite3
 import logging
 import asyncio
+import io
+import json
+from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -15,6 +18,8 @@ TZ = ZoneInfo('Europe/Zurich')
 DATABASE_PATH = os.getenv('DATABASE_PATH', '/data/malfred.db')
 GUILD_ID = int(os.getenv('GUILD_ID', '0') or 0)
 MARKET_CHANNEL_ID = int(os.getenv('MALFRED_CHANNEL_ID', '0') or 0)
+DOC_USER_ID = 124122224016752640
+FESSES_IMAGE_PATH = os.getenv('MALFRED_FESSES_IMAGE', 'assets/fesses_final.png')
 STAFF_IDS = {int(s.strip()) for s in os.getenv('MALFRED_ADMIN_IDS', '').split(',') if s.strip().isdigit()}
 
 # IDs recopiés des emotes Discord fournies par Saphi.
@@ -99,6 +104,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tirages(user_id INTEGER PRIMARY KEY, jour TEXT, choix INTEGER, solde_avant INTEGER, resultat INTEGER, montant INTEGER, rejoue INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS dettes(user_id INTEGER, echeance TEXT, montant INTEGER, PRIMARY KEY(user_id,echeance));
         CREATE TABLE IF NOT EXISTS participations_evenements(user_id INTEGER, evenement TEXT, PRIMARY KEY(user_id,evenement));
+        CREATE TABLE IF NOT EXISTS fesses_calendrier(annee INTEGER PRIMARY KEY, cases TEXT NOT NULL, dernier_jour TEXT);
         ''')
 
 def joueur(db, uid): db.execute('INSERT OR IGNORE INTO joueurs(user_id) VALUES (?)', (uid,))
@@ -365,6 +371,102 @@ class AccueilView(discord.ui.View):
         e,vue=marche_panneau()
         if e is None: return await i.response.send_message('🕯️ Marché fermé. Reviens quand Malfred aura décidé.',ephemeral=True)
         await i.response.send_message(embed=e,view=vue,ephemeral=True)
+
+
+# --- Calendrier /fesses : jeu indépendant des flocons ---
+FESSES_PHRASES = [
+    'Doc, ton dévouement à la recherche scientifique est inquiétant.',
+    'Une case de moins. Une dignité de moins.',
+    'Patience, castor. La magie de Noël exige des sacrifices.',
+    'Je ne garantis absolument pas la qualité de ce cadeau.',
+    'Je te vois zoomer. Oui, je te vois.',
+    'À ce stade, tu es mon meilleur client sans avoir rien acheté.',
+    'Encore un peu de patience. Ou beaucoup. Je ne sais plus.',
+    'Je sens que tu vas adorer. Enfin, je vais adorer.',
+]
+
+def fesses_etat(db, annee):
+    row = db.execute('SELECT cases, dernier_jour FROM fesses_calendrier WHERE annee=?', (annee,)).fetchone()
+    if row:
+        return json.loads(row[0]), row[1]
+    db.execute('INSERT INTO fesses_calendrier(annee,cases,dernier_jour) VALUES (?,?,NULL)', (annee, '[]'))
+    return [], None
+
+def fesses_image(cases, finale=False):
+    # Une seule illustration de base ; les caches sont dessinés en mémoire.
+    with Image.open(FESSES_IMAGE_PATH) as source:
+        im = source.convert('RGB')
+    w,h=im.size
+    draw=ImageDraw.Draw(im)
+    colonnes,lignes=6,4
+    for numero in range(24):
+        if finale or numero in cases:
+            continue
+        x0=numero%colonnes*w//colonnes
+        y0=numero//colonnes*h//lignes
+        x1=(numero%colonnes+1)*w//colonnes
+        y1=(numero//colonnes+1)*h//lignes
+        draw.rectangle((x0,y0,x1,y1), fill=('#831d32' if (numero+numero//colonnes)%2 else '#174d3c'),outline='#d6aa53',width=5)
+        draw.text((x0+18,y0+12),str(numero+1),fill='#fff0cb',stroke_width=1,stroke_fill='#462313')
+        draw.text((x0+(x1-x0)//2-9,y0+(y1-y0)//2-15),'✦',fill='#f2c976')
+    if not finale:
+        # Cache supplémentaire permanent : empêche de lire le panneau, de
+        # reconnaître Malfred et de découvrir le canard avant le 24.
+        for box in [(0,0,int(w*.39),int(h*.57)),
+                    (int(w*.39),0,w,int(h*.53)),
+                    (int(w*.63),int(h*.43),w,h)]:
+            draw.rectangle(box,fill='#65253c',outline='#d6aa53',width=8)
+            cx=(box[0]+box[2])//2;cy=(box[1]+box[3])//2
+            draw.text((cx-35,cy-12),'???',fill='#f2c976')
+    out=io.BytesIO()
+    im.save(out,format='PNG',optimize=True)
+    out.seek(0)
+    return discord.File(out,filename='calendrier_doc.png')
+
+@bot.tree.command(name='fesses', description='Le calendrier secret de Doc 🍑🎄')
+@app_commands.guild_only()
+async def fesses(interaction: discord.Interaction):
+    if interaction.user.id != DOC_USER_ID:
+        await interaction.response.send_message('🔒 Ce calendrier est réservé à Doc. Tu peux regarder, pas toucher !',ephemeral=True)
+        return
+    date=now().date()
+    if date.month != 12 or not 1 <= date.day <= 24:
+        await interaction.response.send_message('🎄 Le calendrier ouvre du 1er au 24 décembre. Malfred ne négocie pas.',ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=False)
+    with db_open() as db:
+        db.execute('BEGIN IMMEDIATE')
+        cases,dernier=fesses_etat(db,date.year)
+        today=date.isoformat()
+        if dernier == today:
+            texte='🍑 Doc, tu as déjà ouvert ta case aujourd’hui ! Reviens demain.'
+            nouveau=False
+        else:
+            # Le 24, toutes les cases sont dévoilées et le piège apparaît.
+            if date.day == 24:
+                cases=list(range(24))
+            else:
+                restantes=[n for n in range(24) if n not in cases]
+                if restantes:
+                    cases.append(random.choice(restantes))
+            db.execute('UPDATE fesses_calendrier SET cases=?, dernier_jour=? WHERE annee=?',
+                       (json.dumps(cases),today,date.year))
+            nouveau=True
+            texte=('🦆 **ESSAIE ENCORE, GROS MALIN !**\n'
+                   '24 jours à attendre les fesses du Chaton… pour recevoir celles d’un canard.\n'
+                   '— Malfred, expert en arnaques de Noël 💚' if date.day==24 else
+                   f'🍑 **Case dévoilée : {len(cases)}/24 !**\n{random.choice(FESSES_PHRASES)}')
+    finale=date.day==24 and len(cases)==24
+    try:
+        fichier=fesses_image(cases,finale=finale)
+        embed=discord.Embed(title='🍑 LE CALENDRIER INTERDIT DE DOC',
+                            description=texte if nouveau else texte+f'\nCases ouvertes : **{len(cases)}/24**',
+                            color=discord.Color.from_rgb(142,34,67))
+        embed.set_image(url='attachment://calendrier_doc.png')
+        await interaction.followup.send(embed=embed,file=fichier)
+    except FileNotFoundError:
+        logging.exception('Image /fesses manquante')
+        await interaction.followup.send('⚠️ Illustration introuvable : vérifier MALFRED_FESSES_IMAGE.',ephemeral=True)
 
 @bot.tree.command(name='malfred',description='Ouvre le menu interactif de Malfred 🎄')
 async def cmd_malfred(i:discord.Interaction): await i.response.send_message(embed=accueil_embed(),view=AccueilView())
