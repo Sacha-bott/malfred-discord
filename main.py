@@ -148,61 +148,114 @@ async def ouvrir(ctx, choix: int = 0):
     await ctx.send(reponse)
 
 
+def afficher_boutique():
+    embed = discord.Embed(title='🛒 LA BOUTIQUE DE MALFRED', description='Le marché noir du pôle Nord\n« Même mes promotions sont des arnaques, petits pigeons ! » 😈', color=discord.Color.green())
+    for code, (nom, prix, description) in OBJETS.items():
+        embed.add_field(name=f'{nom} — {prix} ❄️', value=description, inline=False)
+    embed.set_footer(text='1 achat par jour • 1 exemplaire par objet • Aucun échange')
+    return embed
+
+
+def afficher_inventaire(user):
+    with connexion() as db:
+        creer_joueur(db, user.id)
+        objets = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet', (user.id,)).fetchall()
+        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user.id,)).fetchone()[0]
+    contenu = '\n'.join(OBJETS[code][0] for (code,) in objets if code in OBJETS)
+    return discord.Embed(title=f'🎒 Inventaire de {user.display_name}', description=(contenu or 'Vide ! Même les mites ont déménagé. 😈') + f'\n\n❄️ **{solde} flocons**', color=discord.Color.gold())
+
+
+def effectuer_achat(user_id, objet):
+    nom, prix, _ = OBJETS[objet]
+    with connexion() as db:
+        db.execute('BEGIN IMMEDIATE')
+        creer_joueur(db, user_id)
+        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
+        ancien = db.execute('SELECT dernier_achat FROM boutique_joueurs WHERE user_id=?', (user_id,)).fetchone()
+        if ancien and ancien[0] == jour_utc():
+            return '🛒 Un seul achat par jour, petit pigeon ! Reviens demain. 😈'
+        if possede(db, user_id, objet):
+            return '🎒 Tu possèdes déjà cet objet ! Un exemplaire maximum, avare !'
+        if solde < prix:
+            return f'💸 **{prix} flocons** nécessaires, tu n’en as que **{solde}** !'
+        db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?', (prix, user_id))
+        db.execute('INSERT INTO boutique_joueurs (user_id, dernier_achat) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat', (user_id, jour_utc()))
+        if objet != 'paquet':
+            db.execute('INSERT INTO inventaire (user_id, objet, quantite) VALUES (?, ?, 1)', (user_id, objet))
+        gain = random.randint(0, 30) if objet == 'paquet' else 0
+        if gain:
+            db.execute('UPDATE joueurs SET flocons=flocons+? WHERE user_id=?', (gain, user_id))
+        reponse = f'🛒 Tu achètes **{nom}** pour **{prix} flocons** !\n'
+        if objet == 'paquet':
+            reponse += f'🎁 Le paquet contenait **{gain} flocons** !\n'
+        return reponse + f'❄️ Solde : **{solde - prix + gain} flocons**. 😈'
+
+
+class ChoixObjet(discord.ui.Select):
+    def __init__(self):
+        options = [discord.SelectOption(label=nom.split(' ', 1)[1], value=code, description=f'{prix} flocons — {description[:65]}', emoji=nom.split(' ', 1)[0]) for code, (nom, prix, description) in OBJETS.items()]
+        super().__init__(placeholder='Choisis un objet à acheter…', options=options, custom_id='malfred:choix_objet')
+
+    async def callback(self, interaction):
+        objet = self.values[0]
+        nom, prix, description = OBJETS[objet]
+        await interaction.response.send_message(f'🛒 **{nom}** — **{prix} ❄️**\n{description}\nTu confirmes cet achat ?', view=ConfirmerAchat(objet), ephemeral=True)
+
+
+class ConfirmerAchat(discord.ui.View):
+    def __init__(self, objet):
+        super().__init__(timeout=120)
+        self.objet = objet
+
+    @discord.ui.button(label='Confirmer mon achat', style=discord.ButtonStyle.success, emoji='💰')
+    async def confirmer(self, interaction, button):
+        resultat = effectuer_achat(interaction.user.id, self.objet)
+        await interaction.response.edit_message(content=resultat, view=None)
+
+    @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
+    async def annuler(self, interaction, button):
+        await interaction.response.edit_message(content='Achat annulé. Malfred boude. 😤', view=None)
+
+
+class BoutiqueView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ChoixObjet())
+
+    @discord.ui.button(label='Mon inventaire', emoji='🎒', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire')
+    async def inventaire_bouton(self, interaction, button):
+        await interaction.response.send_message(embed=afficher_inventaire(interaction.user), ephemeral=True)
+
+    @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:flocons')
+    async def flocons_bouton(self, interaction, button):
+        with connexion() as db:
+            creer_joueur(db, interaction.user.id)
+            solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (interaction.user.id,)).fetchone()[0]
+        await interaction.response.send_message(f'❄️ Tu possèdes **{solde} flocons** !', ephemeral=True)
+
+    @discord.ui.button(label='Cadeaux du jour', emoji='🎁', style=discord.ButtonStyle.success, custom_id='malfred:cadeaux')
+    async def cadeaux_bouton(self, interaction, button):
+        embed = discord.Embed(title='🎁 Choisis ton poison !', description='1️⃣ Paquet du lâche : 70 % de gagner (+2 à +5), sinon −1 à −3\n2️⃣ Coffre du filou : 50 % de gagner (+5 à +12), sinon −4 à −8\n3️⃣ Cadeau du démon : 30 % de gagner (+15 à +30), sinon −8 à −15\n\nPour ouvrir : `!ouvrir 1`, `!ouvrir 2` ou `!ouvrir 3`.', color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.command()
 async def boutique(ctx):
-    lignes = ['🛒 **LA BOUTIQUE DE MALFRED** — Les prix sont scandaleux, comme moi ! 😈']
-    for code, (nom, prix, description) in OBJETS.items():
-        lignes.append(f'**{nom}** — **{prix} ❄️**\n{description}\n`!acheter {code}`')
-    lignes.append('**Un achat par jour**, un exemplaire de chaque objet maximum. Pas d’échanges !')
-    await ctx.send('\n\n'.join(lignes))
+    await ctx.send(embed=afficher_boutique(), view=BoutiqueView())
 
 
 @bot.command()
 async def inventaire(ctx):
-    with connexion() as db:
-        creer_joueur(db, ctx.author.id)
-        lignes = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet',
-                            (ctx.author.id,)).fetchall()
-    contenu = '\n'.join(f'• {OBJETS[code][0]}' for (code,) in lignes if code in OBJETS)
-    await ctx.send(f'🎒 **Inventaire de {ctx.author.display_name}**\n'
-                   + (contenu or 'Vide ! Même les mites ont déménagé. 😈'))
+    await ctx.send(embed=afficher_inventaire(ctx.author))
 
 
 @bot.command()
 async def acheter(ctx, objet: str = ''):
     objet = objet.lower().strip()
     if objet not in OBJETS:
-        await ctx.send('🛒 Tape **!boutique** puis **!acheter bouclier**, **trefle**, **boule**, **paquet** ou **canard**.')
+        await ctx.send('🛒 Tape **!boutique** puis sélectionne un objet dans le menu interactif.')
         return
-    nom, prix, _ = OBJETS[objet]
-    with connexion() as db:
-        db.execute('BEGIN IMMEDIATE')
-        creer_joueur(db, ctx.author.id)
-        solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (ctx.author.id,)).fetchone()[0]
-        ancien = db.execute('SELECT dernier_achat FROM boutique_joueurs WHERE user_id=?',
-                            (ctx.author.id,)).fetchone()
-        if ancien and ancien[0] == jour_utc():
-            reponse = '🛒 Un seul achat par jour, petit pigeon ! Reviens demain. 😈'
-        elif possede(db, ctx.author.id, objet):
-            reponse = '🎒 Tu possèdes déjà cet objet ! Un exemplaire maximum, avare !'
-        elif solde < prix:
-            reponse = f'💸 **{prix} flocons** nécessaires, tu n’en as que **{solde}** !'
-        else:
-            db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?', (prix, ctx.author.id))
-            db.execute('INSERT INTO boutique_joueurs (user_id, dernier_achat) VALUES (?, ?) '
-                       'ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat',
-                       (ctx.author.id, jour_utc()))
-            if objet != 'paquet':
-                db.execute('INSERT INTO inventaire (user_id, objet, quantite) VALUES (?, ?, 1)',
-                           (ctx.author.id, objet))
-            gain = random.randint(0, 30) if objet == 'paquet' else 0
-            if gain:
-                db.execute('UPDATE joueurs SET flocons=flocons+? WHERE user_id=?', (gain, ctx.author.id))
-            nouveau = solde - prix + gain
-            reponse = (f'🛒 {ctx.author.mention} achète **{nom}** pour **{prix} flocons** !\n'
-                       + (f'🎁 Le paquet contenait **{gain} flocons** !\n' if objet == 'paquet' else '')
-                       + f'❄️ Solde : **{nouveau} flocons**. 😈')
-    await ctx.send(reponse)
+    await ctx.send(effectuer_achat(ctx.author.id, objet))
 
 
 @bot.command()
@@ -243,4 +296,5 @@ if __name__ == '__main__':
     token = os.getenv('DISCORD_TOKEN')
     if not token:
         raise RuntimeError('La variable DISCORD_TOKEN manque sur Railway.')
+    bot.add_view(BoutiqueView())
     bot.run(token)
