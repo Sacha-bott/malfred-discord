@@ -360,6 +360,11 @@ class AccueilView(discord.ui.View):
     async def classement(self,i,b): await i.response.send_message(embed=classement_embed())
     @discord.ui.button(label='Mes flocons',emoji=button_emoji('flocon'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:flocons',row=1)
     async def flocons(self,i,b): await i.response.send_message(f'❄️ Tu as **{solde(i.user.id)} flocons**.',ephemeral=True)
+    @discord.ui.button(label='Marché Noir',emoji=button_emoji('fume'),style=discord.ButtonStyle.secondary,custom_id='malfred:menu:marche',row=1)
+    async def marche(self,i,b):
+        e,vue=marche_panneau()
+        if e is None: return await i.response.send_message('🕯️ Marché fermé. Reviens quand Malfred aura décidé.',ephemeral=True)
+        await i.response.send_message(embed=e,view=vue,ephemeral=True)
 
 @bot.tree.command(name='malfred',description='Ouvre le menu interactif de Malfred 🎄')
 async def cmd_malfred(i:discord.Interaction): await i.response.send_message(embed=accueil_embed(),view=AccueilView())
@@ -390,43 +395,141 @@ async def reset_cadeau(i:discord.Interaction,joueur:discord.User):
         db.execute('UPDATE joueurs SET dernier_cadeau=NULL WHERE user_id=?',(joueur_id,))
     await i.response.send_message(f'✅ Cadeau réinitialisé pour {joueur.mention}, flocons inchangés.',ephemeral=True)
 
-class MarcheSelect(discord.ui.Select):
-    def __init__(self,offres):
-        opts=[discord.SelectOption(label=NOIR[k][0][:90],value=k,description=(NOIR[k][1]+' • '+NOIR[k][2])[:100]) for k in offres]
-        super().__init__(placeholder='Choisir une marchandise…',options=opts,custom_id='malfred:marche:selection')
-    async def callback(self,i):
-        code=self.values[0]
-        await i.response.send_message(f'**{NOIR[code][0]}**\n{NOIR[code][2]}\nCoût : {NOIR[code][1]}\nConfirmer ?',view=MarcheConfirm(code),ephemeral=True)
+# Remise à zéro globale pour terminer les tests avant le lancement.
+# Confirmation explicite et réservée à la personne qui lance la commande.
+class ConfirmationResetTotal(discord.ui.View):
+    def __init__(self, auteur_id: int):
+        super().__init__(timeout=60)
+        self.auteur_id = auteur_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.auteur_id or not staff(interaction):
+            await interaction.response.send_message('🔒 Cette confirmation ne t’appartient pas.', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='Oui, tout remettre à zéro', style=discord.ButtonStyle.danger)
+    async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Une seule transaction : les joueurs existants conservent leur identifiant,
+        # mais récupèrent tous le solde initial et perdent leur progression.
+        with db_open() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('UPDATE joueurs SET flocons=20, dernier_cadeau=NULL')
+            for table in ('boutique_joueurs', 'inventaire', 'activations',
+                          'marches', 'achats_noirs', 'etat_marche', 'tirages',
+                          'dettes', 'participations_evenements'):
+                db.execute(f'DELETE FROM {table}')
+            nb = db.execute('SELECT COUNT(*) FROM joueurs').fetchone()[0]
+        self.stop()
+        await interaction.response.edit_message(
+            content=f'✅ **Remise à zéro terminée !** {nb} joueur(s) à 20 flocons. '
+                    'Inventaires, bonus, dettes, cadeaux, achats, événements et marchés effacés. '
+                    'Tu peux maintenant relancer `/admin_ouvrir_marche` pour tester.',
+            view=None)
+
+    @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
+    async def annuler(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content='👌 Remise à zéro annulée. Rien n’a changé.', view=None)
+
+@bot.tree.command(name='admin_reset_total', description='Staff : remettre TOUS les joueurs à 20 flocons et effacer les tests')
+@app_commands.guild_only()
+async def admin_reset_total(interaction: discord.Interaction):
+    if not staff(interaction):
+        await interaction.response.send_message('🔒 Réservé au staff.', ephemeral=True)
+        return
+    await interaction.response.send_message(
+        '⚠️ **ATTENTION : remise à zéro GLOBALE et irréversible !**\n'
+        'Tous les joueurs reviendront à **20 flocons**. Objets, bonus, dettes, '
+        'cadeaux quotidiens, achats, marchés et événements seront effacés.\n\n'
+        'Confirmer la suppression des données de test ?',
+        view=ConfirmationResetTotal(interaction.user.id), ephemeral=True)
+
+def marche_panneau():
+    with db_open() as db:
+        marche = marche_actuel(db)
+    if not marche:
+        return None, None
+    mid, fin, offres = marche
+    codes = offres.split(',')
+    fermeture = datetime.fromisoformat(fin).astimezone(TZ).strftime('%d/%m à %H:%M')
+    e = discord.Embed(
+        title=f"{E['machiavelique']} MALFRED ET SON MARCHÉ NOIR",
+        description=(f"Stock illimité • 2 achats par ouverture\nFerme le **{fermeture}** (heure suisse)\n\n"
+                     + '\n'.join(f"**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}" for k in codes)),
+        color=discord.Color.dark_purple())
+    return image(e, 'marche'), MarcheView(codes)
+
+class EntreeMarche(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='Entrer au Marché Noir', emoji=button_emoji('machiavelique'),
+                       style=discord.ButtonStyle.primary, custom_id='malfred:marche:entrer')
+    async def entrer(self, i:discord.Interaction, b:discord.ui.Button):
+        e, vue = marche_panneau()
+        if e is None:
+            return await i.response.send_message('🕯️ Trop tard ! Malfred a fermé boutique.', ephemeral=True)
+        await i.response.send_message(embed=e, view=vue, ephemeral=True)
+
+class MarcheView(discord.ui.View):
+    def __init__(self, offres):
+        super().__init__(timeout=300)
+        # Quatre boutons directs, un par marchandise du jour.
+        for index, code in enumerate(offres):
+            bouton = discord.ui.Button(label=NOIR[code][0].split(' ', 1)[-1][:70],
+                style=discord.ButtonStyle.secondary, row=index//2)
+            async def choisir(i:discord.Interaction, code=code):
+                with db_open() as db:
+                    marche=marche_actuel(db)
+                if not marche or code not in marche[2].split(','):
+                    return await i.response.send_message('🕯️ Cette offre a disparu.', ephemeral=True)
+                e=discord.Embed(title=NOIR[code][0],
+                    description=f"{NOIR[code][2]}\n\n**Coût : {NOIR[code][1]}**\nTu confirmes ?",
+                    color=discord.Color.dark_purple())
+                await i.response.send_message(embed=e, view=MarcheConfirm(code), ephemeral=True)
+            bouton.callback=choisir
+            self.add_item(bouton)
+
 class MarcheConfirm(discord.ui.View):
-    def __init__(self,code): super().__init__(timeout=120);self.code=code
-    @discord.ui.button(label='Confirmer',style=discord.ButtonStyle.success)
+    def __init__(self,code):
+        super().__init__(timeout=120)
+        self.code=code
+    @discord.ui.button(label='Acheter',emoji=button_emoji('riche'),style=discord.ButtonStyle.success)
     async def oui(self,i,b):
         if self.code=='noir_miroir':
             with db_open() as db:
-                options=[discord.SelectOption(label=(OBJETS[k][0] if k in OBJETS else NOIR[k][0])[:90],value=k) for k,q in db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=?',(i.user.id,)) if q>0 and k!='noir_miroir' and (k in OBJETS or k in NOIR)]
-            if not options: return await i.response.edit_message(content='Tu n’as aucun objet à sacrifier.',embed=None,view=None)
+                options=[discord.SelectOption(label=(OBJETS[k][0] if k in OBJETS else NOIR[k][0])[:90],value=k)
+                    for k,q in db.execute('SELECT objet,quantite FROM inventaire WHERE user_id=?',(i.user.id,))
+                    if q>0 and k!='noir_miroir' and (k in OBJETS or k in NOIR)]
+            if not options:
+                return await i.response.edit_message(content='Tu n’as aucun objet à sacrifier.',embed=None,view=None)
             return await i.response.edit_message(content='Quel objet sacrifier ?',embed=None,view=SacrificeView(options))
         msg,ok=achat_noir(i.user.id,self.code)
         await i.response.edit_message(content=msg,embed=None,view=None)
         if ok: await publier(i,'🕯️ ACHAT CLANDESTIN',msg,discord.Color.dark_purple(),'achat')
+    @discord.ui.button(label='Annuler',style=discord.ButtonStyle.secondary)
+    async def non(self,i,b):
+        await i.response.edit_message(content='Achat annulé. Malfred te juge en silence.',embed=None,view=None)
+
 class SacrificeSelect(discord.ui.Select):
-    def __init__(self,options): super().__init__(placeholder='Objet à sacrifier',options=options)
+    def __init__(self,options):
+        super().__init__(placeholder='Choisir un objet à sacrifier',options=options)
     async def callback(self,i):
         msg,ok=achat_noir(i.user.id,'noir_miroir',self.values[0])
         await i.response.edit_message(content=msg,embed=None,view=None)
         if ok: await publier(i,'🕯️ ÉCHANGE CLANDESTIN',msg,discord.Color.dark_purple(),'sacrifice')
 class SacrificeView(discord.ui.View):
-    def __init__(self,options): super().__init__(timeout=120);self.add_item(SacrificeSelect(options))
-class MarcheView(discord.ui.View):
-    def __init__(self,offres): super().__init__(timeout=300);self.add_item(MarcheSelect(offres))
+    def __init__(self,options):
+        super().__init__(timeout=120)
+        self.add_item(SacrificeSelect(options))
 
 @bot.tree.command(name='marche',description='Voir le Marché Noir surprise de Malfred')
 async def cmd_marche(i:discord.Interaction):
-    with db_open() as db: marche=marche_actuel(db)
-    if not marche: return await i.response.send_message('🕯️ Le Marché Noir est fermé.',ephemeral=True)
-    mid,fin,offres=marche;codes=offres.split(',')
-    e=discord.Embed(title=f"{E['machiavelique']} MALFRED ET SON MARCHÉ NOIR",description='Stock illimité • 2 achats par joueur par ouverture\nFerme à '+fin+' (heure suisse)\n\n'+'\n'.join(f'**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}' for k in codes),color=discord.Color.dark_purple())
-    await i.response.send_message(embed=image(e,'marche'),view=MarcheView(codes),ephemeral=True)
+    e,vue=marche_panneau()
+    if e is None:
+        return await i.response.send_message('🕯️ Le Marché Noir est fermé.',ephemeral=True)
+    await i.response.send_message(embed=e,view=vue,ephemeral=True)
 
 @bot.tree.command(name='activer',description='Activer manuellement un objet de ton inventaire')
 @app_commands.describe(objet='Code affiché dans /inventaire')
@@ -502,7 +605,12 @@ async def admin_ouvrir_marche(i:discord.Interaction):
             db.execute('INSERT INTO marches(debut,fin,offres) VALUES (?,?,?)',(debut.isoformat(),fin.isoformat(),offres))
             msg='🕯️ Marché ouvert pendant six heures ! `/marche`';ok=True
     await i.response.send_message(msg,ephemeral=True)
-    if ok: await publier(i,'🕯️ MARCHÉ NOIR OUVERT',msg,discord.Color.dark_purple(),'marche')
+    if ok:
+        salon=i.channel
+        if salon and hasattr(salon,'send'):
+            try:
+                await salon.send(embed=image(discord.Embed(title='🕯️ LE MARCHÉ NOIR EST OUVERT !',description='Psst… marchandises douteuses, stock illimité et seulement six heures pour en profiter !',color=discord.Color.dark_purple()),'marche'),view=EntreeMarche())
+            except discord.HTTPException: logging.exception('Annonce Marché Noir impossible')
 
 # Quatre événements gratuits et indépendants des boutiques / cadeaux.
 EVENEMENTS={5:('hotte','🎁 La Hotte des Regrets'),12:('casino','🎰 Le Casino du Lutin'),19:('tempete','❄️ La Tempête des Flocons'),24:('finale','👑 Le Dernier Coup de Malfred')}
@@ -620,7 +728,8 @@ async def entretien_marche():
         await asyncio.sleep(900)
 
 async def setup_hook():
-    bot.add_view(AccueilView());bot.add_view(CadeauxView());bot.add_view(BoutiqueView());bot.add_view(InventaireView())
+    bot.add_view(AccueilView())
+    bot.add_view(EntreeMarche());bot.add_view(CadeauxView());bot.add_view(BoutiqueView());bot.add_view(InventaireView())
     asyncio.create_task(entretien_marche())
     if GUILD_ID:
         guild=discord.Object(id=GUILD_ID)
