@@ -31,6 +31,15 @@ MALFRED_EMOTES = {
     'triste': '<:malfred_triste:1573297857728090203>',
 }
 
+# Les URL CDN des emotes permettent aussi d'afficher un portrait de Malfred
+# dans les embeds, sans héberger de fichier image supplémentaire.
+MALFRED_IDS = {k: int(v.rsplit(':', 1)[1][:-1]) for k, v in MALFRED_EMOTES.items()}
+def portrait_malfred(humeur):
+    return f"https://cdn.discordapp.com/emojis/{MALFRED_IDS[humeur]}.png?size=256&quality=lossless"
+def illustrer(embed, humeur):
+    embed.set_thumbnail(url=portrait_malfred(humeur))
+    return embed
+
 intents = discord.Intents.default()
 # Pas de message_content, ni de members intent : commandes / et boutons uniquement.
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
@@ -258,6 +267,8 @@ async def annoncer_publiquement(interaction, titre, texte, couleur):
         return False
     embed = discord.Embed(title=titre, description=texte, color=couleur)
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    humeur = 'triste' if ('+' in texte and 'flocons' in texte and '-' not in texte) else 'moquerie' if ('-' in texte and 'flocons' in texte) else 'machiavelique'
+    illustrer(embed, humeur)
     try:
         await salon.send(content=interaction.user.mention, embed=embed,
                          allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
@@ -267,33 +278,33 @@ async def annoncer_publiquement(interaction, titre, texte, couleur):
         return False
 
 def embed_accueil():
-    e = discord.Embed(title='🎄 MALFRED — LE LUTIN DU CHAOS',
+    e = discord.Embed(title=f"{MALFRED_EMOTES['machiavelique']} MALFRED — LE LUTIN DU CHAOS",
         description=f'{phrase("accueil")} 😈\n\nChoisis une activité ci-dessous :', color=discord.Color.dark_green())
     e.add_field(name='🎁 Cadeaux', value='Un pari chaque jour', inline=True)
     e.add_field(name='🛒 Boutique', value='Dépense tes flocons', inline=True)
     e.add_field(name='🎒 Inventaire', value='Tes trouvailles douteuses', inline=True)
     e.add_field(name='🏆 Classement', value='Les plus riches', inline=True)
     e.set_footer(text='Malfred décline toute responsabilité pour tes décisions.')
-    return e
+    return illustrer(e, 'machiavelique')
 
 
 def embed_cadeaux():
-    e = discord.Embed(title='🎁 LES CADEAUX PIÉGÉS',
+    e = discord.Embed(title=f"{MALFRED_EMOTES['amoureux']} LES CADEAUX PIÉGÉS",
         description=f'{phrase("cadeaux")} 😈\n**Un cadeau par jour.**', color=discord.Color.red())
     e.add_field(name='🍬 Friandise suspecte · 70 %', value='🟢 Gain : **2 à 5** ❄️\n🔻 Perte : **1 à 3** ❄️', inline=False)
     e.add_field(name='🧰 Coffre du filou · 50 %', value='🟡 Gain : **5 à 12** ❄️\n🔻 Perte : **4 à 8** ❄️', inline=False)
     e.add_field(name='💀 Pacte maudit · 30 %', value='🔴 Gain : **15 à 30** ❄️\n🔻 Perte : **8 à 15** ❄️', inline=False)
     e.set_footer(text='Choisis directement avec les boutons sous cet encadré.')
-    return e
+    return illustrer(e, 'amoureux')
 
 
 def embed_boutique():
-    e = discord.Embed(title='🛒 LE MARCHÉ NOIR DE MALFRED',
+    e = discord.Embed(title=f"{MALFRED_EMOTES['riche']} LA BOUTIQUE DE MALFRED",
         description=phrase('boutique') + ' 😈', color=discord.Color.green())
     for _, (nom, prix, description) in OBJETS.items():
         e.add_field(name=f'{nom} — {prix} ❄️', value=description, inline=False)
     e.set_footer(text='1 achat par jour • 1 exemplaire de chaque objet • Pas d’échanges')
-    return e
+    return illustrer(e, 'riche')
 
 
 def embed_inventaire(user):
@@ -302,9 +313,10 @@ def embed_inventaire(user):
         objets = db.execute('SELECT objet FROM inventaire WHERE user_id=? ORDER BY objet', (user.id,)).fetchall()
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user.id,)).fetchone()[0]
     contenu = '\n'.join((OBJETS[code][0] if code in OBJETS else NOIR[code][0] if code in NOIR else code)+f' (`{code}`)' for (code,) in objets)
-    return discord.Embed(title=f'🎒 Inventaire de {user.display_name}',
+    e = discord.Embed(title=f'🎒 Inventaire de {user.display_name}',
         description=(contenu or 'C’est vide. Même les mites ont déménagé.') + f"\n\n{MALFRED_EMOTES['flocon']} **{solde} flocons**",
         color=discord.Color.gold())
+    return illustrer(e, 'amoureux')
 
 
 def embed_classement(guild):
@@ -313,8 +325,9 @@ def embed_classement(guild):
     # Classement de tous les joueurs enregistrés dans cette base.
     top = scores[:10]
     description = '\n'.join(f'**{i}.** <@{uid}> — **{score} ❄️**' for i, (uid, score) in enumerate(top, 1))
-    return discord.Embed(title=f"{MALFRED_EMOTES['riche']} LES FORTUNES DU PÔLE NORD",
+    e = discord.Embed(title=f"{MALFRED_EMOTES['riche']} LES FORTUNES DU PÔLE NORD",
         description=description or 'Personne à plumer pour le moment.', color=discord.Color.gold())
+    return illustrer(e, 'riche')
 
 
 class CadeauxView(discord.ui.View):
@@ -327,7 +340,7 @@ class CadeauxView(discord.ui.View):
             await interaction.response.send_message(texte, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        publie = await annoncer_publiquement(interaction, '🎁 LE VERDICT DE MALFRED', texte, couleur)
+        publie = await annoncer_publiquement(interaction, f"{MALFRED_EMOTES['flocon']} LE VERDICT DE MALFRED", texte, couleur)
         await interaction.followup.send('🎄 Ton résultat est visible par tout le salon !' if publie else
                                         '⚠️ Cadeau enregistré, mais Malfred ne peut pas publier ici. Vérifie ses permissions.', ephemeral=True)
 
@@ -631,7 +644,7 @@ async def cmd_marche(interaction:discord.Interaction):
         await interaction.response.send_message('🕯️ Le Marché Noir est fermé. Malfred a disparu dans une ruelle.',ephemeral=True);return
     mid,fin,offres=marche;codes=offres.split(',')
     e=discord.Embed(title=f"{MALFRED_EMOTES['machiavelique']} MALFRED ET SON MARCHÉ NOIR",description='Stock illimité • 2 achats par joueur et par ouverture\nFerme à '+fin+' (heure suisse)\n\n'+'\n'.join(f'**{NOIR[k][0]}** — {NOIR[k][1]}\n{NOIR[k][2]}' for k in codes),color=discord.Color.dark_purple())
-    await interaction.response.send_message(embed=e,view=MarcheView(codes),ephemeral=True)
+    await interaction.response.send_message(embed=illustrer(e, 'machiavelique'),view=MarcheView(codes),ephemeral=True)
 
 @bot.tree.command(name='activer',description='Activer manuellement un objet de ton inventaire')
 @app_commands.describe(objet='Code de l’objet, visible avec /inventaire')
