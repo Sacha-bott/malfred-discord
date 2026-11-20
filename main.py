@@ -141,7 +141,7 @@ def ouvrir_cadeau(user_id, choix):
         creer_joueur(db, user_id)
         solde, dernier = db.execute('SELECT flocons, dernier_cadeau FROM joueurs WHERE user_id=?', (user_id,)).fetchone()
         if dernier == aujourd_hui():
-            return '🎄 ' + phrase('deja'), discord.Color.orange()
+            return '🎄 ' + phrase('deja'), discord.Color.orange(), False
         bonus = 15 if possede(db, user_id, 'trefle') else 0
         if bonus:
             retirer_objet(db, user_id, 'trefle')
@@ -163,7 +163,7 @@ def ouvrir_cadeau(user_id, choix):
         couleur = discord.Color.red()
     if bonus:
         bilan += '\n🍀 Ton trèfle a été utilisé.'
-    return f'**{nom}**\n\n{bilan}\n\n❄️ Nouveau solde : **{nouveau} flocons**.', couleur
+    return f'**{nom}**\n\n{bilan}\n\n❄️ Nouveau solde : **{nouveau} flocons**.', couleur, True
 
 
 def effectuer_achat(user_id, objet):
@@ -174,11 +174,11 @@ def effectuer_achat(user_id, objet):
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
         ancien = db.execute('SELECT dernier_achat FROM boutique_joueurs WHERE user_id=?', (user_id,)).fetchone()
         if ancien and ancien[0] == aujourd_hui():
-            return '🛒 Un achat par jour. Ma boutique n’est pas un buffet à volonté.'
+            return '🛒 Un achat par jour. Ma boutique n’est pas un buffet à volonté.', False
         if possede(db, user_id, objet):
-            return '🎒 Tu possèdes déjà cet objet. Un exemplaire maximum !'
+            return '🎒 Tu possèdes déjà cet objet. Un exemplaire maximum !', False
         if solde < prix:
-            return f'💸 Il faut **{prix} flocons** et tu n’en as que **{solde}**.'
+            return f'💸 Il faut **{prix} flocons** et tu n’en as que **{solde}**.', False
         db.execute('UPDATE joueurs SET flocons=flocons-? WHERE user_id=?', (prix, user_id))
         db.execute('''INSERT INTO boutique_joueurs (user_id, dernier_achat) VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET dernier_achat=excluded.dernier_achat''', (user_id, aujourd_hui()))
@@ -188,7 +188,7 @@ def effectuer_achat(user_id, objet):
         if gain:
             db.execute('UPDATE joueurs SET flocons=flocons+? WHERE user_id=?', (gain, user_id))
     supplement = f'\n🎁 Le paquet contenait **{gain} flocons** !' if objet == 'paquet' else ''
-    return f'🛒 Achat : **{nom}** pour **{prix} flocons** !{supplement}\n{phrase("achat")}\n❄️ Solde : **{solde - prix + gain}**.'
+    return f'🛒 Achat : **{nom}** pour **{prix} flocons** !{supplement}\n{phrase("achat")}\n❄️ Solde : **{solde - prix + gain}**.', True
 
 
 def utiliser_boule(user_id):
@@ -196,7 +196,7 @@ def utiliser_boule(user_id):
         db.execute('BEGIN IMMEDIATE')
         creer_joueur(db, user_id)
         if not possede(db, user_id, 'boule'):
-            return '🔮 Tu n’as pas de boule à neige. Même ma magie a des limites.'
+            return '🔮 Tu n’as pas de boule à neige. Même ma magie a des limites.', False
         retirer_objet(db, user_id, 'boule')
         montant = random.randint(-5, 10)
         solde = db.execute('SELECT flocons FROM joueurs WHERE user_id=?', (user_id,)).fetchone()[0]
@@ -207,8 +207,24 @@ def utiliser_boule(user_id):
         db.execute('UPDATE joueurs SET flocons=? WHERE user_id=?', (nouveau, user_id))
     return (f'🔮 La boule tourbillonne… **{nouveau - solde:+d} flocons** !\n'
             + ('🛡️ Ton bouclier a absorbé la perte.\n' if protege else '')
-            + f'❄️ Nouveau solde : **{nouveau}**.')
+            + f'❄️ Nouveau solde : **{nouveau}**.'), True
 
+
+
+async def annoncer_publiquement(interaction, titre, texte, couleur):
+    """Publie un événement réussi dans le salon, sans révéler les menus privés."""
+    salon = interaction.channel
+    if salon is None or not hasattr(salon, 'send'):
+        return False
+    embed = discord.Embed(title=titre, description=texte, color=couleur)
+    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    try:
+        await salon.send(content=interaction.user.mention, embed=embed,
+                         allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False))
+        return True
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        logging.warning('Annonce publique impossible : %r', exc)
+        return False
 
 def embed_accueil():
     e = discord.Embed(title='🎄 MALFRED — LE LUTIN DU CHAOS',
@@ -266,9 +282,14 @@ class CadeauxView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def jouer(self, interaction, numero):
-        texte, couleur = ouvrir_cadeau(interaction.user.id, numero)
-        await interaction.response.send_message(embed=discord.Embed(
-            title='🎁 Le verdict de Malfred', description=texte, color=couleur), ephemeral=True)
+        texte, couleur, reussi = ouvrir_cadeau(interaction.user.id, numero)
+        if not reussi:
+            await interaction.response.send_message(texte, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        publie = await annoncer_publiquement(interaction, '🎁 LE VERDICT DE MALFRED', texte, couleur)
+        await interaction.followup.send('🎄 Ton résultat est visible par tout le salon !' if publie else
+                                        '⚠️ Cadeau enregistré, mais Malfred ne peut pas publier ici. Vérifie ses permissions.', ephemeral=True)
 
     @discord.ui.button(label='Friandise suspecte', emoji='🍬', style=discord.ButtonStyle.success, custom_id='malfred:ouvrir:1')
     async def choix1(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -290,8 +311,12 @@ class ConfirmerAchat(discord.ui.View):
 
     @discord.ui.button(label='Confirmer', emoji='💰', style=discord.ButtonStyle.success)
     async def confirmer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        resultat = effectuer_achat(interaction.user.id, self.objet)
-        await interaction.response.edit_message(content=resultat, embed=None, view=None)
+        resultat, reussi = effectuer_achat(interaction.user.id, self.objet)
+        await interaction.response.edit_message(content=('✅ Achat effectué ! Regarde dans le salon.' if reussi else resultat), embed=None, view=None)
+        if reussi:
+            publie = await annoncer_publiquement(interaction, '🛒 UNE NOUVELLE ARNAQUE !', resultat, discord.Color.green())
+            if not publie:
+                await interaction.followup.send('⚠️ Achat enregistré, mais annonce impossible : vérifie les permissions du bot.', ephemeral=True)
 
     @discord.ui.button(label='Annuler', style=discord.ButtonStyle.secondary)
     async def annuler(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -333,7 +358,14 @@ class InventaireView(discord.ui.View):
 
     @discord.ui.button(label='Utiliser la boule à neige', emoji='🔮', style=discord.ButtonStyle.primary, custom_id='malfred:inventaire:boule')
     async def boule(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(utiliser_boule(interaction.user.id), ephemeral=True)
+        resultat, reussi = utiliser_boule(interaction.user.id)
+        if not reussi:
+            await interaction.response.send_message(resultat, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        publie = await annoncer_publiquement(interaction, '🔮 RENCONTRE IMPROBABLE', resultat, discord.Color.purple())
+        await interaction.followup.send('🔮 Rencontre annoncée dans le salon !' if publie else
+                                        '⚠️ Rencontre enregistrée, mais annonce impossible : vérifie les permissions du bot.', ephemeral=True)
 
 
 class AccueilView(discord.ui.View):
@@ -354,7 +386,7 @@ class AccueilView(discord.ui.View):
 
     @discord.ui.button(label='Classement', emoji='🏆', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:classement')
     async def classement(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(embed=embed_classement(interaction.guild), ephemeral=True)
+        await interaction.response.send_message(embed=embed_classement(interaction.guild))
 
     @discord.ui.button(label='Mes flocons', emoji='❄️', style=discord.ButtonStyle.secondary, custom_id='malfred:menu:flocons', row=1)
     async def flocons(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -388,12 +420,19 @@ async def cmd_flocons(interaction: discord.Interaction):
 
 @bot.tree.command(name='classement', description='Découvre les plus riches du pôle Nord 🏆')
 async def cmd_classement(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=embed_classement(interaction.guild), ephemeral=True)
+    await interaction.response.send_message(embed=embed_classement(interaction.guild))
 
 
 @bot.tree.command(name='rencontre', description='Utilise ta boule à neige pour une rencontre 🔮')
 async def cmd_rencontre(interaction: discord.Interaction):
-    await interaction.response.send_message(utiliser_boule(interaction.user.id), ephemeral=True)
+    resultat, reussi = utiliser_boule(interaction.user.id)
+    if not reussi:
+        await interaction.response.send_message(resultat, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    publie = await annoncer_publiquement(interaction, '🔮 RENCONTRE IMPROBABLE', resultat, discord.Color.purple())
+    await interaction.followup.send('🔮 Rencontre annoncée dans le salon !' if publie else
+                                    '⚠️ Rencontre enregistrée, mais annonce impossible : vérifie les permissions du bot.', ephemeral=True)
 
 
 def est_staff(interaction):
