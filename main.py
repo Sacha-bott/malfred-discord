@@ -404,6 +404,21 @@ def fesses_etat(db, annee):
     db.execute('INSERT INTO fesses_calendrier(annee,cases,dernier_jour) VALUES (?,?,NULL)', (annee, '[]'))
     return [], None
 
+def choisir_case_dispersee(cases, rng=None):
+    """Choisit une case éloignée des cases déjà révélées, avec hasard en cas d'égalité."""
+    rng = rng or random
+    restantes = [n for n in range(24) if n not in cases]
+    if not restantes:
+        return None
+    if not cases:
+        return rng.choice(restantes)
+    def distance_minimum(n):
+        x, y = n % 6, n // 6
+        return min(max(abs(x - (c % 6)), abs(y - (c // 6))) for c in cases)
+    distances = {n: distance_minimum(n) for n in restantes}
+    meilleure = max(distances.values())
+    return rng.choice([n for n in restantes if distances[n] == meilleure])
+
 def fesses_image(cases, finale=False):
     source_path = FESSES_TROLL_PATH if finale else FESSES_IMAGE_PATH
     with Image.open(source_path) as source: im = source.convert('RGB')
@@ -447,7 +462,7 @@ async def fesses(interaction: discord.Interaction):
             if date.day == 24: cases=list(range(24))
             else:
                 restantes=[n for n in range(24) if n not in cases]
-                if restantes: cases.append(random.choice(restantes))
+                if restantes: cases.append(choisir_case_dispersee(cases))
             db.execute('UPDATE fesses_calendrier SET cases=?, dernier_jour=? WHERE annee=?', (json.dumps(cases),today,date.year))
             nouveau=True
             texte=('🦆 **ESSAIE ENCORE, GROS MALIN !**\n24 jours à attendre les fesses du Chaton… pour recevoir celles d’un canard.\n— Malfred, expert en arnaques de Noël 💚' if date.day==24 else f'🍑 **Case dévoilée : {len(cases)}/24 !**\n{random.choice(FESSES_PHRASES)}')
@@ -501,7 +516,10 @@ async def admin_test_fesses(i:discord.Interaction,jour_test:app_commands.Range[i
         return await i.response.send_message('🔒 Réservé au staff.',ephemeral=True)
     await i.response.defer(ephemeral=True)
     # Simulation uniquement : aucun accès ni écriture dans fesses_calendrier.
-    cases=list(range(jour_test))
+    cases=[]
+    rng=random.Random(2026)  # Prévisualisation stable et dispersée
+    for _ in range(jour_test):
+        cases.append(choisir_case_dispersee(cases, rng))
     finale=(jour_test==24)
     try:
         fichier=fesses_image(cases,finale=finale)
